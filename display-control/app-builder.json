@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-display-control",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "app_name": "Nomad Display Control",
   "bin_name": "nomad-display-control",
   "description": "Control projectors and TVs over the network",

@@ -71,6 +71,7 @@ class Screen:
     title = ""
     hint = ""
     help = ""      # Fn+H text for this screen (the standard key list is added)
+    steps = None   # nomadui.StepsPopup: setup steps shown when the screen opens
 
     def softkeys(self, app) -> list:
         """Actions on number keys 4..8: up to 5 (label, fn(app)) or None.
@@ -169,6 +170,9 @@ class HelpScreen(Screen):
     def __init__(self, under: Screen, app):
         self.title = f"Help: {under.title}" if under.title else "Help"
         self.lines = []
+        st = getattr(under, "steps", None)
+        if st is not None:
+            self.lines += [Line(st.title, HEAD)] + [Line(t) for t in st.help_text().split("\n")] + [Line("")]
         if under.help:
             self.lines += [Line(t) for t in under.help.split("\n")] + [Line("")]
         bar = under.keybar(app) or []
@@ -420,6 +424,7 @@ class TaskScreen(Screen):
                  report: str | None = None, autostart: bool = True):
         self.title, self.fn, self.kw = title, fn, kw or {}
         self.on_pick, self.report = on_pick, report or title
+        self.loading_text = ""      # label on the Loading popup (default: the title)
         self.out = Output()
         self.thread = None
         self.cur = -1        # -1 = follow the end
@@ -446,12 +451,28 @@ class TaskScreen(Screen):
             self.out.set_status("stopped" if self.out.stopped else "done")
 
         self.out.set_status("running")
+        self.t0 = time.monotonic()
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
 
     @property
     def running(self) -> bool:
         return bool(self.thread and self.thread.is_alive())
+
+    def lcd_overlay(self):
+        """The Loading popup while the task runs and has no results yet
+        (only headings), so a slow scan never looks locked up."""
+        if not self.running:
+            return None
+        with self.out.lock:
+            real = [l for l in self.out.lines if l.text and not l.text.startswith("-- ")
+                    and l.color not in (HEAD, DIM)]
+        if real:
+            return None
+            heads = [l.text[3:] for l in self.out.lines if l.text.startswith("-- ")]
+        t0 = getattr(self, "t0", None)
+        label = self.loading_text or (heads[-1] if heads else self.title)
+        return lambda surf: T.draw_loading(surf, label, t0)
 
     help = ("Results appear as they come in. F/X scroll, ',' and '/' scroll sideways. "
             "Blue lines can be opened with OK. Saved reports go in Site & reports.")
@@ -739,13 +760,17 @@ class Renderer:
     def window_rows(self) -> int:
         return self.win_p.rows() if self.win_p else 0
 
-    def render(self, screen: Screen, site: str, force: bool = False, keys: list | None = None) -> None:
+    def render(self, screen: Screen, site: str, force: bool = False, keys: list | None = None,
+               popup=None) -> None:
+        """popup: a nomadui.StepsPopup drawn over the LCD screen."""
         rows_l = self.lcd_p.rows(bool(keys))
         v_lcd = screen.view(rows_l)
         v_lcd.keys = keys
+        over = getattr(screen, "lcd_overlay", lambda: None)()
         key = (id(screen), v_lcd.title, len(v_lcd.lines), v_lcd.hint, v_lcd.cursor, v_lcd.hscroll,
                v_lcd.edit, tuple((l.text, l.color) if isinstance(l, Line) else l for l in v_lcd.lines[-60:]),
-               site, repr(keys))
+               site, repr(keys), (id(popup), popup.top) if popup is not None else None,
+               int(time.monotonic() * 8) if over else None)
         if key == self.last and not force:
             return
         now = time.monotonic()
@@ -754,6 +779,10 @@ class Renderer:
         self.last, self.last_t = key, now
         top = self._top(("lcd", id(screen)), v_lcd, rows_l - (1 if v_lcd.edit is not None else 0))
         self.lcd_p.draw(self.lcd, v_lcd, site, top, wide=False)
+        if over is not None:
+            over(self.lcd)
+        if popup is not None:
+            popup.render(self.lcd)
         self._flush_lcd()
         if self.win is not None and self.win_p is not None:
             try:
@@ -799,6 +828,17 @@ class Renderer:
         except OSError as e:
             print(f"LCD write failed ({e})", flush=True)
             self.lcd_dev = None
+
+    def loading(self, text: str):
+        """Context manager: the Loading popup over the current LCD picture
+        while the main thread does something slow (connect, read a file)."""
+        base = self.lcd.copy()
+
+        def present(draw):
+            draw(self.lcd)
+            self._flush_lcd()
+        self.last = None            # redraw normally afterwards
+        return T.loading(present, text, background=lambda s: s.blit(base, (0, 0)))
 
     def save_lcd(self, path: str) -> None:
         pygame.image.save(self.lcd, path)

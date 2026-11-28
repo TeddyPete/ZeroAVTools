@@ -18,6 +18,7 @@ from . import __version__
 from . import nomadui as _nomadui
 
 _nomadui.set_about("Nomad AV Tester", __version__)
+_nomadui.set_popups("nomad-av-tester")
 
 # Navigation follows the Nomad standard (CardputerZero arrows are on the Fn
 # layer: Fn+F up, Fn+X down, Fn+Z left, Fn+C right; OK is Enter):
@@ -70,6 +71,42 @@ HELP_TEXT = {
     "modes": "Pick the HDMI video mode. OK switches to it.",
     "audio": "Pick a test signal for the HDMI and headphone audio. OK plays it.",
 }
+# Setup steps the user does by hand, shown as a popup when the mode opens
+# (nomadui.StepsPopup; D hides it for good, Fn+H shows them again).
+SYNC_STEPS = ["Set the TV or projector to the picture mode you will use (Game mode changes delay).",
+              "Point this device's camera at the screen, close enough that it sees the white flash.",
+              "Put this device's mic near the speakers that play the HDMI sound.",
+              "Keep the room quiet, then press OK to start."]
+METER_STEPS = ["Hold this device where the listener sits, mic toward the speakers, or plug a "
+               "measurement source into the 3.5 mm input.",
+               "For real SPL: play a calibrator or check a reference meter once, then match it with "
+               "+ / - (saved for next time).",
+               "Press 5 to play a test tone or pink noise through HDMI."]
+HELP_TEXT["sync"] += "\n\nBefore you start:\n" + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(SYNC_STEPS))
+HELP_TEXT["meter"] += "\n\nBefore you start:\n" + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(METER_STEPS))
+
+
+class StepsOnLcd:
+    """A nomadui.StepsPopup on the LCD over the mode's title, shown and
+    closed like the Fn+H help (lcd.show_help)."""
+
+    def __init__(self, title: str, popup):
+        self.title, self.popup = title, popup
+
+    def handle(self, key):
+        return self.popup.handle(key)
+
+    def render(self, surf, f=None) -> None:
+        _nomadui.render(surf, self.title, [], "")
+        self.popup.render(surf)
+
+
+def steps_popup(title: str, steps: list, key: str):
+    """StepsOnLcd for this mode, or None when the user hid it with D."""
+    p = _nomadui.StepsPopup.maybe("Before you start", steps, key, ok="OK done")
+    return StepsOnLcd(title, p) if p else None
+
+
 AUDIO_MODES = [(None, "Off"), ("tone", "1 kHz tone, both"), ("lr", "1 kHz L then R"),
                ("left", "1 kHz left only"), ("right", "1 kHz right only"), ("pink", "Pink noise"),
                ("sweep", "Log sweep 20 Hz-20 kHz"), ("polarity", "Polarity pulse")]
@@ -342,12 +379,17 @@ def run(args) -> None:
 
     pygame.init()
     lcd = LcdPanel()
+    # Opening HDMI, reading the EDID and building the patterns takes a few
+    # seconds: keep the Loading popup turning on the LCD meanwhile.
+    boot = _nomadui.loading(lcd.draw_async, "Starting HDMI output")
+    boot.__enter__()
     # The launcher stops apps with SIGTERM; turn that into a clean quit.
     signal.signal(signal.SIGTERM, lambda *_: pygame.event.post(pygame.event.Event(pygame.QUIT)))
     try:
         pygame.display.init()
         pygame.mouse.set_visible(False)
     except pygame.error as e:
+        boot.__exit__(None, None, None)
         no_hdmi(lcd, f"Display error: {e}")
         return
     from . import edid, sdlmodes
@@ -398,6 +440,7 @@ def run(args) -> None:
         else:
             out = HdmiOutput(mode, fullscreen_desktop=windowed, display=disp)
     except Exception as e:
+        boot.__exit__(None, None, None)
         no_hdmi(lcd, str(e))
         return
     size = out.size
@@ -406,6 +449,7 @@ def run(args) -> None:
     log_cma(f"output open at {mode.label}")
     cma_t = time.monotonic()
     patterns = all_patterns()
+    boot.__exit__(None, None, None)
     if args.selftest:
         selftest(out, modes, mode, patterns, edid_info)
         out.close()
@@ -696,14 +740,21 @@ def run(args) -> None:
                 continue
             if ch == "a":
                 from .meter import Meter
-                meter, meter_msg = Meter(args.mic_device), ""
-                meter.start()
+                with _nomadui.loading(lcd.draw_async, "Opening the mic"):
+                    meter, meter_msg = Meter(args.mic_device), ""
+                    meter.start()
+                help_view = steps_popup("Audio meter", METER_STEPS, "steps-meter")
+                if help_view is not None:
+                    lcd.show_help(help_view)
                 skip_gap = True
                 continue
             if ch == "l":
                 from .lipsync import LipSyncTest
                 tones.stop()
                 sync, sync_msg = LipSyncTest(tones.device, args.mic_device), ""
+                help_view = steps_popup("Lip-sync test", SYNC_STEPS, "steps-sync")
+                if help_view is not None:
+                    lcd.show_help(help_view)
                 dirty = True
                 skip_gap = True
                 continue
@@ -752,7 +803,8 @@ def run(args) -> None:
             elif ch == "m" and len(modes) > 1:
                 mode_idx = (mode_idx + 1) % len(modes)
                 mode = modes[mode_idx]
-                out.open(mode)
+                with _nomadui.loading(lcd.draw_async, f"Switching to {mode.label}"):
+                    out.open(mode)
                 size = out.size
                 refresh = mode.hz or desk_hz
                 print(f"mode {mode.label} ({'set' if out.mode_set else 'size only'})",

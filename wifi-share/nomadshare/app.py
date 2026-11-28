@@ -16,6 +16,7 @@ from .ui import BACK, SELECT, Busy, Confirm, Form, Menu, Message, Screen, Prompt
 
 APP_TITLE = "Nomad WiFi Share"
 T.set_about(APP_TITLE, __version__)
+T.set_popups("nomad-wifi-share")
 HELP_MAIN = ("Nomad WiFi Share shares internet between Wi-Fi and the Ethernet port. "
              "Settings are changed right here on the keyboard. TheTechNomad.com")
 
@@ -25,6 +26,7 @@ class App:
         self.panel, self.kb = panel, kb
         self.cfg = S.load()
         self.stack: list[Screen] = []
+        self.steps = None                 # nomadui.StepsPopup shown over the screen
         self.helpview = None    # Fn+H help view while it is shown
         self.dirty = True
         self.quit = False
@@ -38,7 +40,19 @@ class App:
     # ---- stack ----
     def push(self, s: Screen) -> None:
         self.stack.append(s)
+        st = getattr(s, "steps", None)       # setup steps the user must do by hand
+        if st is not None and not T.steps_hidden(st.key):
+            st.top = 0
+            self.steps = st
         self.dirty = True
+
+    def show_steps(self, popup) -> None:
+        """Show setup steps (nomadui.StepsPopup) over the current screen,
+        unless the user hid that popup with D."""
+        if popup is not None and not T.steps_hidden(popup.key):
+            popup.top = 0
+            self.steps = popup
+            self.dirty = True
 
     def pop(self, s: Screen | None = None) -> None:
         if s is None:
@@ -128,8 +142,15 @@ class App:
             if self.helpview.handle(k) == "close":
                 self.helpview = None
             return
+        if self.steps is not None:
+            if self.steps.handle(k) == "close":
+                self.steps = None
+            return
         if k.name == "help":
-            self.helpview = T.HelpView(top.title, top.help or HELP_MAIN, top.keybar())
+            text = top.help or HELP_MAIN
+            if getattr(top, "steps", None) is not None:
+                text = top.steps.title + "\n" + top.steps.help_text() + "\n\n" + text
+            self.helpview = T.HelpView(top.title, text, top.keybar())
             return
         if not top.text_entry and top.soft(k):
             return
@@ -138,13 +159,25 @@ class App:
     def draw(self) -> None:
         if not self.stack:
             return
+        surf, f = self.panel.surf, self.panel.fonts
         if self.helpview is not None:
-            self.helpview.render(self.panel.surf, self.panel.fonts)
+            self.helpview.render(surf, f)
             self.panel.flush()
             return
         s = self.stack[-1]
+        busy = s if isinstance(s, Busy) else None
+        if busy is not None and len(self.stack) > 1:
+            s = self.stack[-2]      # the Loading popup sits over the screen it came from
         rows, sel = s.rows()
-        self.panel.draw(s.title, rows, s.hint, sel, s.right(), s.keybar(), getattr(s, "paint", None))
+        T.render(surf, s.title, rows, s.hint, sel, s.right(), f, s.keybar())
+        paint = getattr(s, "paint", None)
+        if paint:
+            paint(surf, f)
+        if busy is not None:
+            T.draw_loading(surf, busy.label, busy.t0, f)
+        elif self.steps is not None:
+            self.steps.render(surf, f)
+        self.panel.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +251,13 @@ class Home(Menu):
                          lambda: app.run_task("Wi-Fi -> Ethernet", "Starting", lambda: net.start_wifi_to_eth(app.cfg),
                                               ok_title="Sharing on"),
                          yes="OK start", no="ESC back"))
+        app.show_steps(T.StepsPopup("Before you share", [
+            "Join a Wi-Fi network with internet first (Join Wi-Fi).",
+            "Plug this device's Ethernet port into the switch (or straight into one device).",
+            "Gear on that switch must get its address by DHCP, or use the gateway and DNS shown "
+            "next if DHCP is off.",
+            "Unplug any other router or DHCP server from that switch so there is only one."],
+            key="steps-wifi2eth", ok="OK done"))
 
     def mode2(self):
         app, c = self.app, self.app.cfg
@@ -232,6 +272,12 @@ class Home(Menu):
                          lambda: app.run_task("Hotspot", "Starting hotspot", lambda: net.start_hotspot(app.cfg),
                                               ok_title="Hotspot on"),
                          yes="OK start", no="ESC back"))
+        app.show_steps(T.StepsPopup("Before the hotspot", [
+            "Plug this device's Ethernet port into a wired network with internet (a router or "
+            "a live wall port).",
+            "If that network has no DHCP, set the Ethernet uplink address under Settings first.",
+            "Connect phones and laptops to the hotspot name and password shown next."],
+            key="steps-hotspot", ok="OK done"))
 
     def stop(self):
         app = self.app

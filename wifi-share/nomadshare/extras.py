@@ -466,6 +466,12 @@ def nice_ceiling(v: float) -> float:
 
 class SwitchPort(Screen):
     title = "Switch port"
+    steps = T.StepsPopup("Switch port setup", [
+        "Plug this device's Ethernet port into the switch port you want to check.",
+        "Make sure LLDP is on in the switch (on by default on most managed switches; "
+        "Netgear AV Line: System > LLDP).",
+        "Press 4 to listen. The switch sends LLDP every 30 s, so it can take that long."],
+        key="steps-lldp", ok="OK done")
     hint = "4 listen  ←/ESC back"
     help = ("Which switch and port the Ethernet cable goes to, and the port's VLAN, read from "
             "LLDP (most managed switches, including Netgear AV Line, send it every 30 s). "

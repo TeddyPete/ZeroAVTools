@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 
+from . import nomadui as T
 from . import store, util
 from .keys import Key
 from .ui import DIM, INFO, OK, WARN, BAD, Field, Form, Line, Menu, Screen, View, WHITE
@@ -419,19 +420,29 @@ def setup(app, host: str = "", proto: str = "TCP", port: str = "") -> None:
                 app.toast("Type a host or IP")
                 return
             elif p == "SSH":
-                conn = SshConn(v["host"], port, v["user"], v["password"])
+                with app.r.loading(f"Connecting to {v['host']}"):
+                    conn = SshConn(v["host"], port, v["user"], v["password"])
                 target = f"{v['host']}:{port}"
             elif p == "UDP":
                 conn = UdpConn(v["host"], port, v["lport"] or 0)
                 target = f"udp {v['host']}:{port}"
             else:
-                conn = TcpConn(v["host"], port, telnet=(p == "Telnet"))
+                with app.r.loading(f"Connecting to {v['host']}"):
+                    conn = TcpConn(v["host"], port, telnet=(p == "Telnet"))
                 target = f"{v['host']}:{port}"
         except Exception as e:
             app.toast(f"Connect failed: {e}")
             return
         app.pop()
         app.push(TerminalScreen(conn, target, v["ending"], v["send"] == "HEX", v["view"] == "HEX"))
+        if p == "Serial":
+            app.show_steps(T.StepsPopup("Serial setup", [
+                "Plug a USB to RS-232 adapter into this device (FTDI or Prolific chip).",
+                "Cable it to the gear's RS-232 control port. Nothing comes back? Add a null-modem "
+                "adapter (swaps TX and RX) or check the pinout of 3-pin Phoenix ports.",
+                "Set Baud, Data bits, Parity and Stop bits to match the gear (often 9600 8 N 1).",
+                "Pick the Line end the protocol wants (CR for most AV gear)."],
+                key="steps-serial", ok="OK done"))
 
     app.push(Form("Terminal setup", fields, go,
                   "SSH login is not saved. Serial: USB-RS232 adapter."))

@@ -18,6 +18,7 @@ from .ui import BACK, DOWN, SELECT, UP, Busy, Confirm, Form, Menu, Message, Prom
 
 APP_TITLE = "Nomad Packet Capture"
 T.set_about(APP_TITLE, __version__)
+T.set_popups("nomad-packet-capture")
 
 HELP = (
     "Two modes:\n"
@@ -52,6 +53,7 @@ class App:
         self.panel, self.kb = panel, kb
         self.cfg = S.load()
         self.stack: list[Screen] = []
+        self.steps = None                 # nomadui.StepsPopup shown over the screen
         self.helpview = None    # Fn+H help view while it is shown
         self.dirty = True
         self.quit = False
@@ -68,7 +70,19 @@ class App:
     # ---- stack ----
     def push(self, s: Screen) -> None:
         self.stack.append(s)
+        st = getattr(s, "steps", None)       # setup steps the user must do by hand
+        if st is not None and not T.steps_hidden(st.key):
+            st.top = 0
+            self.steps = st
         self.dirty = True
+
+    def show_steps(self, popup) -> None:
+        """Show setup steps (nomadui.StepsPopup) over the current screen,
+        unless the user hid that popup with D."""
+        if popup is not None and not T.steps_hidden(popup.key):
+            popup.top = 0
+            self.steps = popup
+            self.dirty = True
 
     def pop(self, s: Screen | None = None) -> None:
         if s is None:
@@ -129,6 +143,7 @@ class App:
                 self._follow_file = None
                 self.state = C.read_state()
                 self.push(LiveView(self))
+                self.show_steps(mode_steps("Inline tap"))
             self.run_task("Inline tap", "Bridging + starting",
                           lambda: C.start(dict(self.cfg, tap_adapter=ad)), after=started_tap)
             return
@@ -141,6 +156,7 @@ class App:
                 self._follow_file = None
                 self.state = C.read_state()
                 self.push(LiveView(self))
+                self.show_steps(mode_steps("Mirror port"))
             self.run_task("Start capture", "Starting", lambda: C.start(self.cfg), after=started)
 
         if link["exists"] and not link["up"]:
@@ -237,8 +253,15 @@ class App:
             if self.helpview.handle(k) == "close":
                 self.helpview = None
             return
+        if self.steps is not None:
+            if self.steps.handle(k) == "close":
+                self.steps = None
+            return
         if k.name == "help":
-            self.helpview = T.HelpView(top.title, top.help or HELP, top.keybar())
+            text = top.help or HELP
+            if getattr(top, "steps", None) is not None:
+                text = top.steps.title + "\n" + top.steps.help_text() + "\n\n" + text
+            self.helpview = T.HelpView(top.title, text, top.keybar())
             return
         if not top.text_entry and top.soft(k):
             return
@@ -247,19 +270,24 @@ class App:
     def draw(self) -> None:
         if not self.stack:
             return
+        surf, f = self.panel.surf, self.panel.fonts
         if self.helpview is not None:
-            self.helpview.render(self.panel.surf, self.panel.fonts)
+            self.helpview.render(surf, f)
             self.panel.flush()
             return
         s = self.stack[-1]
+        busy = s if isinstance(s, Busy) else None
+        if busy is not None and len(self.stack) > 1:
+            s = self.stack[-2]      # the Loading popup sits over the screen it came from
         rows, sel = s.rows()
+        T.render(surf, s.title, rows, s.hint, sel, s.right(), f, s.keybar())
         if hasattr(s, "overlay"):
-            from . import nomadui as T
-            T.render(self.panel.surf, s.title, rows, s.hint, sel, s.right(), self.panel.fonts, s.keybar())
-            s.overlay(self.panel.surf)
-            self.panel.flush()
-        else:
-            self.panel.draw(s.title, rows, s.hint, sel, s.right(), s.keybar())
+            s.overlay(surf)
+        if busy is not None:
+            T.draw_loading(surf, busy.label, busy.t0, f)
+        elif self.steps is not None:
+            self.steps.render(surf, f)
+        self.panel.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +805,26 @@ def ready_text(app) -> str:
     return f"{c['iface']} {netinfo.link_text(c['iface'])}"
 
 
+MIRROR_STEPS = [
+    "On the switch, set up a mirror (SPAN / port monitor) port: copy the ports or VLAN you want "
+    "to watch to one free port. Netgear AV Line: Monitoring > Mirroring.",
+    "Plug this device's Ethernet port into that mirror port.",
+    "Start capture. No packets? Check the mirror source ports and direction (Tx and Rx)."]
+TAP_STEPS = [
+    "Plug a USB Ethernet adapter into this device.",
+    "Unplug the network cable from the gear you want to watch and plug it into this device's "
+    "built-in Ethernet port.",
+    "Run a second cable from the USB adapter to that gear.",
+    "Traffic now passes through this device (up to 100 Mb/s). PoE does not pass through, "
+    "so PoE-powered gear needs its own power."]
+
+
+def mode_steps(mode: str):
+    if mode == "Inline tap":
+        return T.StepsPopup("Inline tap setup", TAP_STEPS, key="steps-tap", ok="OK done")
+    return T.StepsPopup("Mirror port setup", MIRROR_STEPS, key="steps-mirror", ok="OK done")
+
+
 class ModeMenu(Menu):
     def __init__(self, app):
         self.app = app
@@ -789,6 +837,7 @@ class ModeMenu(Menu):
             c["capmode"] = m
             app.save_cfg()
             app.pop(self)
+            app.show_steps(mode_steps(m))
 
         def toggle_auto():
             c["autotap"] = not c.get("autotap")
@@ -807,6 +856,7 @@ class ModeMenu(Menu):
 
 class TapStatus(Screen):
     title = "Inline tap"
+    steps = mode_steps("Inline tap")
 
     @property
     def hint(self):

@@ -18,14 +18,16 @@ from . import keys, reports, store, util  # noqa: E402
 from . import nomadui as T  # noqa: E402
 from .ui import AboutScreen, DIM, Field, Form, Line, Menu, Message, Renderer, Screen, TaskScreen, View  # noqa: E402
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 T.set_about("Nomad Net Tools", VERSION)
+T.set_popups("nomad-net-tools")
 
 
 class App:
     def __init__(self, window: bool = True):
         self.cfg = store.Config()
         self.stack = []
+        self.steps = None         # nomadui.StepsPopup over the screen
         self.quit = False
         pygame.font.init()
         self.r = Renderer(window)
@@ -43,6 +45,15 @@ class App:
     def push(self, s) -> None:
         self.stack.append(s)
         s.on_show(self)
+        if getattr(s, "steps", None) is not None:
+            self.show_steps(s.steps)
+
+    def show_steps(self, popup) -> None:
+        """Setup steps the user does by hand, over the current screen
+        (skipped once the user hid that popup with D)."""
+        if popup is not None and not T.steps_hidden(popup.key):
+            popup.top = 0
+            self.steps = popup
 
     def pop(self) -> None:
         if self.stack:
@@ -70,6 +81,10 @@ class App:
         """One key: Fn+H help, number keys 4..8, then the screen itself."""
         from .ui import HelpScreen
         top = self.stack[-1]
+        if self.steps is not None:
+            if self.steps.handle(k) == "close":
+                self.steps = None
+            return
         if k.name == "help" and not isinstance(top, HelpScreen):
             self.push(HelpScreen(top, self))
             return
@@ -92,7 +107,8 @@ class App:
                 st = steps.pop(0)
                 next_step = time.monotonic() + (2.0 if st == "wait" else 0.6)
                 if st.startswith("shot:"):
-                    self.r.render(self.stack[-1], self.site, force=True, keys=self.stack[-1].keybar(self))
+                    self.r.render(self.stack[-1], self.site, force=True, keys=self.stack[-1].keybar(self),
+                                  popup=self.steps)
                     self.r.save_lcd(f"/tmp/{st[5:]}.png")
                 elif st == "quit":
                     self.quit = True
@@ -117,11 +133,25 @@ class App:
                 if self.stack:
                     self.dispatch(k)
             if self.stack:
-                self.r.render(self.stack[-1], self.site, keys=self.stack[-1].keybar(self))
+                self.r.render(self.stack[-1], self.site, keys=self.stack[-1].keybar(self), popup=self.steps)
         for s in self.stack:
             s.close()
         if self.kb:
             self.kb.close()
+
+
+MIRROR_STEPS = [
+    "On the switch, set up a mirror (SPAN / port monitor) port that copies the port of the "
+    "gear you want to watch. Netgear AV Line: Monitoring > Mirroring.",
+    "Plug this device's Ethernet port into that mirror port.",
+    "Start. Nothing shows? Check the mirror source port and that both Tx and Rx are copied."]
+
+
+def with_steps(screen, title: str, steps: list, key: str, ok: str = "OK done"):
+    """Give a screen the setup steps the user must do by hand; they pop up
+    when it opens (nomadui.StepsPopup) and show again with Fn+H."""
+    screen.steps = T.StepsPopup(title, steps, key=key, ok=ok)
+    return screen
 
 
 def ifc(v: dict) -> str:
@@ -463,17 +493,19 @@ def capture_menu(app):
         def go(v, app):
             app.pop()
             app.task("Control sniffer", sniff.sniffer, iface=ifc(v), extra=v["extra"])
-        app.push(Form("Control sniffer", [app.iface_field(util.wired_name()), Field("extra", "Extra ports", "")], go,
-                      "Plug into a mirror (SPAN) port of the controller's port."))
+        app.push(with_steps(Form("Control sniffer", [app.iface_field(util.wired_name()), Field("extra", "Extra ports", "")], go,
+                                 "Plug into a mirror (SPAN) port of the controller's port."),
+                            "Mirror port setup", MIRROR_STEPS, "steps-mirror"))
 
     def pcap(app):
         def go(v, app):
             app.pop()
             app.task("pcap capture", sniff.pcap, cfg=app.cfg, iface=ifc(v), bpf=v["bpf"], seconds=v["seconds"],
                      max_mb=v["mb"])
-        app.push(Form("pcap capture", [app.iface_field(util.wired_name()), Field("bpf", "Filter (tcpdump)", ""),
-                                       Field("seconds", "Seconds (blank=until Q)", ""), Field("mb", "Max MB", "100")],
-                      go, "Saved in the site's report folder."))
+        app.push(with_steps(Form("pcap capture", [app.iface_field(util.wired_name()), Field("bpf", "Filter (tcpdump)", ""),
+                                                  Field("seconds", "Seconds (blank=until Q)", ""), Field("mb", "Max MB", "100")],
+                                 go, "Saved in the site's report folder."),
+                            "Mirror port setup", MIRROR_STEPS, "steps-mirror"))
 
     app.push(Menu("Capture", [("Control-protocol sniffer", sniffer), ("pcap capture (mirror port)", pcap)]))
 
@@ -481,7 +513,7 @@ def capture_menu(app):
 def checks_menu(app):
     from . import av, checks
 
-    def simple(title, fn, secs=None, extra=None):
+    def simple(title, fn, secs=None, extra=None, steps=None):
         def f(app):
             fields = [app.iface_field(util.wired_name())]
             if secs:
@@ -493,7 +525,10 @@ def checks_menu(app):
                 if secs:
                     kw["seconds"] = v["seconds"]
                 app.task(title, fn, **kw)
-            app.push(Form(title, fields, go))
+            form = Form(title, fields, go)
+            if steps:
+                with_steps(form, *steps)
+            app.push(form)
         return f
 
     def ports(app):
@@ -506,7 +541,13 @@ def checks_menu(app):
     app.push(Menu("Network checks", [
         ("DHCP: rogue server check", simple("DHCP check", checks.dhcp, "6")),
         ("IP conflict check", simple("IP conflict", checks.conflict)),
-        ("LLDP/CDP switch port, VLAN", simple("LLDP / CDP", checks.lldp, "65")),
+        ("LLDP/CDP switch port, VLAN", simple("LLDP / CDP", checks.lldp, "65", steps=(
+            "Switch port setup", [
+                "Plug this device's Ethernet port straight into the switch port you want to check.",
+                "LLDP (or CDP on Cisco) must be on in the switch. It is on by default on most "
+                "managed switches; Netgear AV Line: System > LLDP.",
+                "Switches send it every 30 to 60 s, so the check listens for about a minute."],
+            "steps-lldp"))),
         ("Link / cable errors", simple("Link check", checks.link, "15")),
         ("Control-port check", ports),
     ]))
