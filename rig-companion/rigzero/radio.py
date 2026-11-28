@@ -9,8 +9,12 @@ import threading
 import time
 from decimal import Decimal, InvalidOperation
 
+from .models import SPP_UUID, model_from_id
+from .usbserial import SerialPort, usb_present
+from .gps_clock import GpsClock
+from .packet_native import Engine, md5, milliseconds
 from .protocol import (KissDecoder, MODES, STEPS, decode_ax25, decode_tnc2, fo_frequency,
-                       inspect_packet, kiss_encode, message_frame)
+                       inspect_packet, kiss_encode, message_frame, position_frame)
 
 
 class Radio:
@@ -25,6 +29,16 @@ class Radio:
                       "rx": 0, "tx": 0, "invalid": 0, "last_rx": "", "error": "",
                       "bands": [{"hz": 0, "mode": -1, "power": -1, "channel": -1,
                                  "squelch": -1, "meter": -1, "busy": -1} for _ in range(2)]}
+        self.state.update(packet_band=None, packet_hz=0, packet_rate=None, beacon_armed=False, session_id=0,
+                          native_tnc=None, native_rate=None)
+        self.state["model"] = ""
+        self.device_address = None
+        self.gps_clock = GpsClock()
+        self.native = None
+        self.native_log = []
+        self.native_closing = 0
+        self.state.update(packet_link="Idle", packet_peer="", packet_log=[])
+        self.beacon = None
         self.line = bytearray()
         self.discard = False
         self.lines = []
@@ -35,8 +49,24 @@ class Radio:
         self.next_poll = 0.0
         self.poll_index = 0
         self.closed = False
+        self.suspended = ""         # another feature (D-STAR gateway) is using the radio link
         self.thread = threading.Thread(target=self._run, name="rig-radio", daemon=True)
         self.thread.start()
+
+    def open_link(self, device, service=SPP_UUID):
+        """Bluetooth (via BlueZ) or a USB serial port, both with socket-style recv/sendall."""
+        if device.get("usb"):
+            return SerialPort(device["usb"], getattr(self, "usb_baud", 9600))
+        if not self.link:
+            raise RuntimeError("Bluetooth is unavailable")
+        return self.link.connect(device, service) if service != SPP_UUID else self.link.connect(device)
+
+    def drop_link(self):
+        connection = self.connection
+        if isinstance(connection, SerialPort):
+            connection.close()
+        elif self.link:
+            self.link.disconnect()
 
     def snapshot(self):
         with self.lock:
@@ -67,13 +97,7 @@ class Radio:
             before = self.decoder.invalid
             for command, payload in self.decoder.feed(data):
                 if command == 0:
-                    frame = decode_ax25(payload)
-                    if frame:
-                        self.record(frame)
-                    else:
-                        self.state["invalid"] += 1
-                    if self.remote_reply:
-                        self.remote_reply(kiss_encode(payload))
+                    self._rx_frame(payload)
             self.state["invalid"] += self.decoder.invalid - before
             return
         for byte in data:
@@ -87,21 +111,61 @@ class Radio:
             elif not self.discard:
                 self.line.append(byte)
 
-    def record(self, frame, direction="RX"):
+    def _rx_frame(self, payload):
+        """One received AX.25 frame from the radio's TNC (any radio family)."""
+        frame = decode_ax25(payload)
+        if frame:
+            self.record(frame, raw=payload)
+        else:
+            self.state["invalid"] += 1
+        if self.remote_reply:
+            self.remote_reply(kiss_encode(payload))
+        if self.native:
+            try:
+                self.native.require("rx", payload, len(payload), milliseconds())
+            except OSError:
+                raise
+            except Exception:
+                self.packet_finish()
+                raise
+
+    def send_ax25(self, frame):
+        """Transmit one AX.25 frame through the radio's TNC."""
+        self.connection.sendall(kiss_encode(frame))
+
+    def send_kiss_param(self, payload, command):
+        self.connection.sendall(kiss_encode(payload, command))
+
+    def record(self, frame, direction="RX", raw=None):
         packet = inspect_packet(*frame, direction=direction)
+        utc, _ = self.gps_clock.reading()
+        if utc is not None:
+            packet["time"] = utc.isoformat(timespec="seconds")
+        if raw is not None:
+            packet["ax25_hex"] = raw.hex()
+        if self.state["kiss"]:
+            packet["packet_band"] = self.state["packet_band"]
+            packet["frequency_hz"] = self.state["packet_hz"]
+            packet["packet_rate"] = self.state["packet_rate"]
         self.store.record(packet)
         self.state["rx" if direction == "RX" else "tx"] += 1
         self.state["last_rx"] = packet["source"] + "  " + packet["kind"]
 
     def _line(self, line):
+        if line.startswith("$"):
+            if self.state["model"] == "TH-D75":
+                self.gps_clock.observe(line)
+            return
         frame = decode_tnc2(line)
         if frame:
             self.record(frame)
             return
         self.lines.append(line)
         self.lines = self.lines[-32:]
-        if line == "ID TH-D75":
+        model = model_from_id(line)
+        if model:
             self.state["identity"] = True
+            self.state["model"] = model
             self.identified_at = time.monotonic()
         match = re.fullmatch(r"(FQ|MD|PC|VM|SQ|SM|BY) ([01]),([0-9]+)", line)
         if match:
@@ -111,6 +175,10 @@ class Radio:
         for code, key in (("BC", "active"), ("DL", "dual"), ("AG", "volume")):
             if re.fullmatch(code + r" [0-9]+", line):
                 self.state[key] = int(line.split()[1])
+        if re.fullmatch(r"TN [01],[01]", line):
+            self.state["native_tnc"] = tuple(int(value) for value in line[3:].split(","))
+        if re.fullmatch(r"AS [01]", line):
+            self.state["native_rate"] = int(line[-1])
 
     def cat(self, command, expected=None, timeout=1.8):
         if self.state["kiss"]:
@@ -141,17 +209,19 @@ class Radio:
     def identify(self):
         for attempt in range(3):
             try:
-                return self.cat("ID", lambda line: line == "ID TH-D75")
+                return self.cat("ID", lambda line: model_from_id(line) is not None)
             except RuntimeError:
                 if attempt == 2:
                     raise
 
-    def require_control(self):
+    def require_control(self, packet=False):
         if not self.state["connected"] or not self.state["identity"]:
             raise RuntimeError("Radio identity is not confirmed")
         if self.store.get("recovery", None):
             raise RuntimeError("Restore the previous KISS session first")
         self.identify()
+        if not packet and self.state["model"] != "TH-D75":
+            raise RuntimeError("Use the handset controls for " + self.state["model"])
 
     def change(self, field, amount=1):
         self.require_control()
@@ -170,7 +240,8 @@ class Radio:
         if field == "volume":
             candidates = [max(0, min(200, current + amount))]
         elif field == "mode":
-            candidates = [(current + i) % count for i in range(1, count + 1)]
+            direction = 1 if amount >= 0 else -1
+            candidates = [(current + i * direction) % count for i in range(1, count + 1)]
         else:
             candidates = [(current + amount) % count]
         for value in candidates:
@@ -237,13 +308,32 @@ class Radio:
                 self.end_kiss()
             else:
                 return
-        self.require_control()
+        self.require_control(packet=True)
+        model = self.state["model"]
+        if frequency and model != "TH-D75":
+            raise RuntimeError("Tune this model from the handset before starting KISS")
         band = self.state["active"]
+        if owner in ("local", "terminal", "winlink"):
+            selected_band = self.store.get("packet_band", None)
+            if selected_band in (0, 1):
+                band = selected_band
+            speed = self.store.get("packet_speed", None) if speed is None else speed
         tn = self.query("TN")
         if not re.fullmatch(r"TN [01],[01]", tn):
             raise RuntimeError("End the radio's existing data session first")
-        snapshot = {"tn": tn, "band": band, "fo": self.query(f"FO {band}"),
+        snapshot = {"tn": tn, "band": band, "model": model, "fo": self.query(f"FO {band}"),
                     "vm": self.query(f"VM {band}"), "rate": self.query("AS")}
+        if self.device_address:
+            snapshot["address"] = self.device_address
+        if snapshot["rate"] not in ("AS 0", "AS 1"):
+            raise RuntimeError("Radio did not report a supported packet rate")
+        if (not re.fullmatch(rf"VM {band},[012]", snapshot["vm"])
+                or not re.fullmatch(rf"FO {band},[0-9]+(?:,[^,]*){{19}}", snapshot["fo"])):
+            raise RuntimeError("Can't verify the radio's restore values; try Handset KISS monitor")
+        result = self.query(f"FQ {band}")
+        if not re.fullmatch(rf"FQ {band},[0-9]+", result):
+            raise RuntimeError("Could not verify the data band frequency")
+        packet_hz = int(result.split(",")[1])
         self.store.set("recovery", snapshot)
         self.pending_kiss = True
         try:
@@ -258,6 +348,7 @@ class Radio:
                     raise RuntimeError("Station frequency did not confirm")
                 if self.query(f"MD {band}") != f"MD {band},0":
                     raise RuntimeError("Packet FM did not confirm")
+                packet_hz = frequency
             if speed is not None:
                 if speed not in (0, 1):
                     raise ValueError("Invalid packet speed")
@@ -266,7 +357,11 @@ class Radio:
                     raise RuntimeError("Packet speed did not confirm")
             # Persist before TN, since a disconnect can happen after the write.
             self.cat(f"TN 2,{band}", lambda line: line == f"TN 2,{band}")
-            self.state.update(kiss=True, owner=owner, status="KISS active; radio controls paused", error="")
+            self.gps_clock.break_stream()
+            self.update(kiss=True, owner=owner, packet_band=band, packet_hz=packet_hz,
+                        session_id=self.state["session_id"] + 1,
+                        packet_rate=int(snapshot["rate"][-1]) if speed is None else speed,
+                        status="KISS active; radio controls paused", error="")
             self.decoder = KissDecoder()
             self.pending_kiss = False
             self.line.clear()
@@ -275,19 +370,25 @@ class Radio:
             raise
 
     def restore(self):
+        self.stop_beacon()
         snapshot = self.store.get("recovery", None)
         if not snapshot:
             return
+        if snapshot.get("address") and snapshot["address"] != self.device_address:
+            raise RuntimeError("Reconnect the original radio to restore")
         self.state["kiss"] = False
         self.connection.sendall(b"\xc0\xff\xc0")
         self.line.clear()
         self.discard = False
         time.sleep(.15)
         self.identify()
+        if self.state["model"] != snapshot.get("model", "TH-D75"):
+            raise RuntimeError("Waiting for the original Kenwood radio to restore")
         band = snapshot["band"]
-        self.cat(snapshot["rate"])
         if self.query("AS") != snapshot["rate"]:
-            raise RuntimeError("Packet speed restoration did not confirm")
+            self.cat(snapshot["rate"])
+            if self.query("AS") != snapshot["rate"]:
+                raise RuntimeError("Packet speed restoration did not confirm")
         if self.query(f"FO {band}") != snapshot["fo"]:
             # FO writes require VFO mode; a local monitor may have stayed in MR.
             self.cat(f"VM {band},0")
@@ -296,49 +397,241 @@ class Radio:
             self.cat(snapshot["fo"])
             if self.query(f"FO {band}") != snapshot["fo"]:
                 raise RuntimeError("VFO restoration did not confirm")
-        self.cat(snapshot["vm"])
         if self.query(f"VM {band}") != snapshot["vm"]:
-            raise RuntimeError("Memory mode restoration did not confirm")
+            self.cat(snapshot["vm"])
+            if self.query(f"VM {band}") != snapshot["vm"]:
+                raise RuntimeError("Memory mode restoration did not confirm")
         self.cat(snapshot["tn"], lambda line: line == snapshot["tn"])
         if self.query("TN") != snapshot["tn"]:
             raise RuntimeError("APRS mode restoration did not confirm")
         self.store.set("recovery", None)
         self.pending_kiss = False
-        self.state.update(kiss=False, owner="", status="Radio settings restored", error="")
+        self.remote_reply = None
+        self.update(kiss=False, owner="", packet_band=None, packet_hz=0, packet_rate=None,
+                    status="Radio settings restored", error="")
 
     def end_kiss(self):
+        if self.native:
+            self.packet_stop()
+            return
+        if self.state["owner"] == "monitor":
+            self.update(kiss=False, owner="", status="Monitor stopped; end KISS on radio")
+            self.line.clear()
+            self.discard = False
+            return
         if self.state["kiss"] or self.store.get("recovery", None):
             self.restore()
 
-    def send_message(self, recipient, text):
+    def packet_event(self, kind, data):
+        if kind == 0:
+            if self.state["owner"] not in ("terminal", "winlink") or not self.state["kiss"]:
+                raise RuntimeError("Packet session lost its radio link")
+            self.send_ax25(data)
+            decoded = decode_ax25(data)
+            if decoded:
+                self.record(decoded, "TX", raw=data)
+        else:
+            message = data.decode("utf-8", "replace").replace("\r", "\n")
+            for line in message.splitlines():
+                self.native_log.append(("RX " if kind == 1 else "") + line[:300])
+            self.native_log = self.native_log[-200:]
+            self.update(packet_log=list(self.native_log))
+
+    def packet_open(self, owner, peer, frequency="", password="", extended=False, expected_hz=0):
+        from decimal import Decimal
+        from .protocol import valid_call
+        from pathlib import Path
         source = self.store.get("callsign")
-        frame = message_frame(source, recipient.upper(), text, self.store.get("path", ""))
+        if owner not in ("terminal", "winlink") or not valid_call(peer) or not valid_call(source) or peer == source:
+            raise ValueError("Enter different valid local and destination callsigns")
+        if self.native or self.state["owner"]:
+            raise RuntimeError("End the current packet session first")
+        hz = None
+        def packet_frequency(value):
+            return (144000000 <= value <= 148000000 or 222000000 <= value <= 225000000
+                    or 430000000 <= value <= 450000000)
+        if frequency:
+            if not re.fullmatch(r"[0-9]{3}(?:\.[0-9]{1,6})?", frequency):
+                raise ValueError("Enter a channel in MHz")
+            hz = int(Decimal(frequency) * 1000000)
+            if not packet_frequency(hz):
+                raise ValueError("Choose an amateur packet frequency")
+        if not self.connection:
+            raise RuntimeError("Connect the radio first")
+        self.native_log = []
+        self.remote_reply = None
+        self.update(packet_link="Calling", packet_peer=peer, packet_log=[])
+        try:
+            self.native = Engine(self.store.folder, Path.home() / "Documents" / "Rig-Companion-Transfers", self.packet_event)
+            self.start_kiss(owner, hz)
+            actual_hz = self.state["packet_hz"]
+            if not packet_frequency(actual_hz) or (hz or expected_hz) != actual_hz:
+                raise RuntimeError("Packet frequency changed. Review and confirm again.")
+            self.native.require("open", source, peer, password, owner == "winlink", extended,
+                                milliseconds(), md5, error="Could not open connected AX.25")
+        except Exception:
+            self.packet_finish()
+            raise
+
+    def packet_finish(self):
+        if self.native:
+            self.native.close()
+            self.native = None
+        self.native_closing = 0
+        self.update(packet_link="Closed")
+        if self.state["owner"] in ("terminal", "winlink") or self.store.get("recovery", None):
+            self.restore()
+
+    def packet_stop(self):
+        if self.native and not self.native_closing:
+            self.native.require("close", milliseconds())
+            self.native_closing = time.monotonic() + 7
+            self.update(packet_link="Closing")
+
+    def packet_service(self):
+        if not self.native:
+            return
+        self.native.require("tick", milliseconds())
+        current = self.native.call("state")
+        if current == 0 or self.native_closing and time.monotonic() >= self.native_closing:
+            self.packet_finish()
+        else:
+            self.update(packet_link={1: "Calling", 2: "Connected", 3: "Closing"}[current])
+
+    def packet_send(self, text):
+        if not self.native or self.state["owner"] != "terminal":
+            raise RuntimeError("Connect an AX.25 terminal first")
+        data = (text + "\r").encode()
+        self.native.require("send", data, len(data), error="Terminal is busy or disconnected")
+        self.packet_event(2, ("TX " + text).encode())
+
+    def packet_file(self, name, data):
+        if not self.native or self.state["owner"] != "terminal":
+            raise RuntimeError("Connect an AX.25 terminal first")
+        self.native.require("yapp", name, data, len(data), milliseconds(), error="YAPP is busy or disconnected")
+        self.packet_event(2, ("YAPP sending " + name).encode())
+
+    def packet_receive_files(self, enabled):
+        if not self.native or self.state["owner"] != "terminal":
+            raise RuntimeError("Connect an AX.25 terminal first")
+        self.native.call("accept_yapp", enabled)
+
+    def manual_monitor(self):
+        if not self.connection:
+            raise RuntimeError("Connect the radio over Bluetooth first")
+        if self.state["kiss"] or self.store.get("recovery", None):
+            raise RuntimeError("End or restore the existing KISS session first")
+        self.decoder = KissDecoder()
+        self.update(kiss=True, owner="monitor", packet_band=None, packet_hz=0,
+                    packet_rate=None, status="Listening to handset KISS")
+
+    def send_message(self, recipient, text, session_id=None):
+        if session_id is not None and session_id != self.state["session_id"]:
+            raise RuntimeError("Packet session changed; confirm the message again")
+        source = self.store.get("callsign")
+        recipient = recipient.upper()
+        path = self.store.get("path", "")
+        message_frame(source, recipient, text, path)
+        self.require_local_kiss()
+        utc, _ = self.gps_clock.reading()
+        message_id = self.store.stage_message(source.removesuffix("-0"), recipient.removesuffix("-0"), text, utc)
+        frame = message_frame(source, recipient, text, path, f"{message_id % 100000:05d}")
+        self.send_local_frame(frame)
+        self.store.mark_message_sent(message_id)
+        self.state["status"] = "Sent to TNC; awaiting APRS ACK"
+
+    def require_local_kiss(self):
         if not self.state["kiss"] or self.state["owner"] != "local":
             raise RuntimeError("Start local KISS before sending")
         if not self.state["identity"]:
             raise RuntimeError("Radio is unavailable")
-        self.connection.sendall(kiss_encode(frame))
-        self.record(decode_ax25(frame), "TX")
-        self.state["status"] = "Packet sent to radio; delivery unconfirmed"
+
+    def send_local_frame(self, frame):
+        self.require_local_kiss()
+        self.send_ax25(frame)
+        self.record(decode_ax25(frame), "TX", raw=frame)
+
+    def configure_beacon(self, position, interval, expected_session, session_id, gps=False):
+        actual = (self.state["packet_band"], self.state["packet_hz"], self.state["packet_rate"])
+        if (actual[0] not in (0, 1) or actual[1] <= 0 or actual[2] != 0
+                or tuple(expected_session) != actual or session_id != self.state["session_id"]):
+            raise RuntimeError("Start 1200 bps KISS on the intended APRS frequency")
+        if interval not in (0, 300, 600, 1200):
+            raise ValueError("Choose a valid beacon interval")
+        if gps and (interval or self.gps_clock.position() != position):
+            raise RuntimeError("GPS position expired; get a fresh fix")
+        frame = position_frame(self.store.get("callsign"), position, self.store.get("path", ""))
+        self.stop_beacon()
+        self.send_local_frame(frame)
+        if interval:
+            self.beacon = (frame, interval, time.monotonic() + interval)
+            self.update(beacon_armed=True)
+        self.update(status="Position queued to radio")
+
+    def stop_beacon(self):
+        self.beacon = None
+        self.update(beacon_armed=False)
+
+    def service_beacon(self):
+        if self.beacon:
+            frame, interval, next_at = self.beacon
+            if time.monotonic() >= next_at:
+                try:
+                    self.send_local_frame(frame)
+                except Exception:
+                    self.stop_beacon()
+                    raise
+                self.beacon = (frame, interval, time.monotonic() + interval)
 
     def _connect(self, device):
-        self.state["status"] = "Connecting to TH-D75…"
-        self.connection = self.link.connect(device)
-        self.state.update(connected=True, identity=False, kiss=False, owner="")
+        snapshot = self.store.get("recovery", None)
+        if snapshot:
+            original = snapshot.get("address") or (self.store.get("device") or {}).get("address")
+            if original != device["address"]:
+                raise RuntimeError("Reconnect the original radio to restore")
+        self.state["status"] = "Connecting to Kenwood radio"
+        self.gps_clock.break_stream()
+        self.connection = self.open_link(device)
+        self.device_address = device["address"]
+        with self.lock:
+            for band in self.state["bands"]:
+                band.update(hz=0, mode=-1, power=-1, channel=-1, squelch=-1, meter=-1, busy=-1)
+            self.state.update(connected=True, identity=False, model="", active=0, dual=-1,
+                              volume=-1, kiss=False, owner="", native_tnc=None, native_rate=None)
         self.line.clear()
         self.discard = False
         if self.store.get("recovery", None):
             self.restore()
-        self.identify()
+        try:
+            self.identify()
+        except (RuntimeError, TimeoutError):
+            self.store.set("device", device)
+            self.update(status="Paired; CAT model unconfirmed", error="")
+            return
         self.store.set("device", device)
-        self.state.update(status="TH-D75 connected", error="")
+        self.update(status=self.state["model"] + " connected", error="")
 
     def _poll(self):
-        commands = ["ID", "BC", "FQ 0", "FQ 1", "MD 0", "MD 1", "PC 0", "PC 1",
-                    "VM 0", "VM 1", "DL", "AG", "SQ 0", "SQ 1", "SM 0", "SM 1", "BY 0", "BY 1"]
-        self.query(commands[self.poll_index % len(commands)])
-        self.poll_index += 1
         self.next_poll = time.monotonic() + .08
+        if not self.state["identity"]:
+            self.next_poll = time.monotonic() + 8
+            try:
+                self.identify()
+            except (RuntimeError, TimeoutError):
+                pass
+            return
+        commands = ["ID", "BC", "FQ 0", "FQ 1", "MD 0", "MD 1", "PC 0", "PC 1",
+                    "VM 0", "VM 1", "DL", "AG", "SQ 0", "SQ 1", "SM 0", "SM 1", "BY 0", "BY 1",
+                    "TN", "AS"]
+        if self.state["model"] != "TH-D75":
+            commands = ["ID", "FQ 0", "FQ 1"]
+        command = commands[self.poll_index % len(commands)]
+        self.poll_index += 1
+        try:
+            self.query(command)
+        except (RuntimeError, TimeoutError):
+            if command not in ("TN", "AS"):
+                raise
 
     def _run(self):
         next_connect = time.monotonic() + 1
@@ -349,47 +642,125 @@ class Radio:
                 action, args = None, ()
             try:
                 if action == "connect":
+                    if self.suspended:
+                        raise RuntimeError(f"Stop the {self.suspended} first")
+                    if self.native:
+                        raise RuntimeError("Disconnect Terminal or Winlink before changing radios")
                     if self.connection:
                         self.end_kiss()
-                        self.link.disconnect()
+                        self.drop_link()
+                        self.connection = None
+                        self.update(connected=False, identity=False)
                     self._connect(*args)
                 elif action:
                     self.state["error"] = ""
                     {"change": self.change, "tune": self.tune, "step": self.step,
                      "start_kiss": self.start_kiss, "end_kiss": self.end_kiss,
                          "send": self.send_message, "remote": self._remote,
-                         "remote_open": self._remote_open}[action](*args)
+                         "beacon": self.configure_beacon, "stop_beacon": self.stop_beacon,
+                         "monitor": self.manual_monitor,
+                         "packet_open": self.packet_open, "packet_stop": self.packet_stop,
+                         "packet_send": self.packet_send, "packet_file": self.packet_file,
+                         "packet_receive_files": self.packet_receive_files,
+                         "remote_open": self._remote_open,
+                         "suspend": self.suspend, "resume": self.resume}[action](*args)
                 elif self.connection:
                     self._receive()
+                    try:
+                        self.packet_service()
+                    except OSError:
+                        raise
+                    except Exception:
+                        self.packet_finish()
+                        raise
+                    self.service_beacon()
                     if not self.state["kiss"] and time.monotonic() >= self.next_poll:
                         if not self.store.get("recovery", None):
                             self._poll()
-                elif self.link and time.monotonic() >= next_connect:
+                elif self.link and not self.suspended and time.monotonic() >= next_connect:
                     next_connect = time.monotonic() + 8
                     device = self.store.get("device", None)
                     if device:
-                        devices = self.link.devices()
-                        match = next((d for d in devices if d["address"] == device["address"]), None)
+                        if device.get("usb"):
+                            match = device if usb_present(device) else None
+                        else:
+                            devices = self.link.devices()
+                            match = next((d for d in devices if d["address"] == device["address"]), None)
                         if match:
                             self._connect(match)
-            except (OSError, ConnectionError) as error:
+            except TimeoutError as error:
+                self.update(error=str(error), status=str(error))
+            except OSError as error:
                 self._lost(str(error))
             except Exception as error:
                 self.update(error=str(error), status=str(error))
         try:
             if self.connection:
-                self.end_kiss()
+                if self.native:
+                    self.packet_stop()
+                    deadline = time.monotonic() + 2
+                    while self.native and time.monotonic() < deadline:
+                        self._receive()
+                        self.packet_service()
+                    if self.native:
+                        self.packet_finish()
+                else:
+                    self.end_kiss()
         except Exception as error:
             self.update(error=f"Restore pending on reconnect: {error}")
-        if self.link:
-            self.link.disconnect()
+        self.drop_link()
         self.closed = True
 
-    def _lost(self, reason):
-        if self.link:
-            self.link.disconnect()
+    def suspend(self, reason, dv_band=None):
+        """Release the Bluetooth link so the D-STAR gateway can use the radio.
+
+        dv_band (0 = A): first switch that band to DV mode over CAT and make it active.
+        """
+        if self.native:
+            raise RuntimeError("Disconnect Terminal or Winlink before D-STAR")
+        if self.state["kiss"]:
+            self.end_kiss()
+        note = ""
+        if dv_band is not None and self.connection and self.state.get("identity"):
+            try:
+                if self.query(f"MD {dv_band}") != f"MD {dv_band},1":
+                    self.cat(f"MD {dv_band},1")
+                    if self.query(f"MD {dv_band}") != f"MD {dv_band},1":
+                        raise RuntimeError("DV mode did not confirm")
+                if self.query("BC") != f"BC {dv_band}":
+                    self.cat(f"BC {dv_band}")
+                note = "Band A set to DV. "
+            except (RuntimeError, TimeoutError) as error:
+                note = f"Could not set DV mode ({error}). "
+        self.stop_beacon()
+        self.remote_reply = None
+        if self.connection:
+            self.drop_link()
         self.connection = None
-        self.update(connected=False, identity=False, kiss=False, owner="", status="Radio disconnected", error=reason)
+        self.suspended = reason
+        self.gps_clock.break_stream()
+        self.update(connected=False, identity=False, kiss=False, owner="",
+                    status=f"{note}{reason} is using the radio", error="", dv_note=note.strip())
+
+    def resume(self):
+        self.suspended = ""
+        self.update(status="Reconnecting to the radio", error="")
+
+    def _lost(self, reason):
+        if self.native:
+            self.native.close()
+            self.native = None
+            self.native_closing = 0
+            self.update(packet_link="Link lost")
+        self.gps_clock.break_stream()
+        self.stop_beacon()
+        self.remote_reply = None
+        self.drop_link()
+        self.connection = None
+        self.device_address = None
+        self.update(connected=False, identity=False, kiss=False, owner="", packet_band=None,
+                    packet_hz=0, packet_rate=None, native_tnc=None, native_rate=None,
+                    status="Radio disconnected", error=reason)
 
     def _remote(self, owner, command, payload, reply):
         if self.state["owner"] and self.state["owner"] != owner:
@@ -407,6 +778,7 @@ class Radio:
                 if not (136000000 <= frequency <= 174000000 or 216000000 <= frequency <= 260000000 or 400000000 <= frequency <= 470000000):
                     raise ValueError("Unsupported packet station frequency")
                 self.start_kiss(owner, frequency, self.store.get("remote_rate", 0))
+                self.remote_reply = reply
             elif op == 0xeb:
                 self.end_kiss()
             return
@@ -421,10 +793,10 @@ class Radio:
         if command == 0 and payload:
             if decode_ax25(payload) is None:
                 raise ValueError("Invalid AX.25 transmit frame")
-            self.connection.sendall(kiss_encode(payload))
-            self.record(decode_ax25(payload), "TX")
+            self.send_ax25(payload)
+            self.record(decode_ax25(payload), "TX", raw=payload)
         elif command in range(1, 6) and len(payload) == 1:
-            self.connection.sendall(kiss_encode(payload, command))
+            self.send_kiss_param(payload, command)
 
     def _remote_open(self, owner, reply):
         self.start_kiss(owner)
@@ -436,3 +808,37 @@ class Radio:
         if not self.closed:
             raise RuntimeError("Waiting for radio restoration. Exit again after it completes.")
 
+
+
+class IdleRadio:
+    """Stand-in until a radio package is chosen on the splash screen. Loads nothing."""
+
+    family = ""
+    model_key = ""
+    suspended = ""
+    native = None
+    closed = True
+
+    def __init__(self, store=None, link=None):
+        self.state = {"connected": False, "identity": False, "status": "Choose your radio", "active": 0,
+                      "dual": -1, "volume": -1, "kiss": False, "owner": "", "rx": 0, "tx": 0, "invalid": 0,
+                      "last_rx": "", "error": "", "model": "", "packet_band": None, "packet_hz": 0,
+                      "packet_rate": None, "beacon_armed": False, "session_id": 0, "native_tnc": None,
+                      "native_rate": None, "packet_link": "Idle", "packet_peer": "", "packet_log": [],
+                      "bands": [{"hz": 0, "mode": -1, "power": -1, "channel": -1, "squelch": -1,
+                                 "meter": -1, "busy": -1} for _ in range(2)]}
+
+    def snapshot(self):
+        result = copy.deepcopy(self.state)
+        result["fresh"] = False
+        return result
+
+    def update(self, **values):
+        self.state.update(values)
+
+    def submit(self, action, *args):
+        self.state["error"] = "Choose your radio first"
+        return False
+
+    def close(self):
+        pass

@@ -12,6 +12,7 @@ from .aprs import describe
 class Store:
     def __init__(self, folder: Path):
         folder.mkdir(parents=True, exist_ok=True)
+        self.folder = folder
         self.lock = threading.RLock()
         self.revision = 0
         self.station_cache = (-1, [])
@@ -19,6 +20,10 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS outbox(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL,
+                recipient TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
+                created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS packets(
                 id INTEGER PRIMARY KEY, time TEXT NOT NULL, source TEXT NOT NULL,
                 kind TEXT NOT NULL, body TEXT NOT NULL, saved INTEGER NOT NULL DEFAULT 0);
@@ -76,6 +81,14 @@ class Store:
             if packet["kind"] == "Message" and packet["direction"] == "RX":
                 self.db.execute("INSERT OR IGNORE INTO messages(time,sender,recipient,text,body) VALUES(?,?,?,?,?)",
                                 (packet["time"], packet["sender"], packet["recipient"], packet["text"], body))
+            if packet["kind"] == "Ack" and packet["direction"] == "RX":
+                token = packet["text"][3:]
+                if len(token) == 5 and token.isascii() and token.isdigit():
+                    self.db.execute("UPDATE outbox SET status=? WHERE id % 100000=? "
+                                    "AND sender=? AND recipient=? AND status IN ('Awaiting ACK','Send uncertain') "
+                                    "AND created BETWEEN datetime(?, '-24 hours') AND datetime(?)",
+                                    ("Acknowledged" if packet["text"].startswith("ack") else "Rejected",
+                                     int(token), packet["recipient"], packet["sender"], packet["time"], packet["time"]))
             self.db.execute("DELETE FROM packets WHERE saved=0 AND id NOT IN (SELECT id FROM packets ORDER BY id DESC LIMIT 2000)")
             self.db.execute("DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY id DESC LIMIT 500)")
             self.revision += 1
@@ -85,6 +98,23 @@ class Store:
         with self.lock, self.db:
             self.db.execute("UPDATE packets SET saved=1 WHERE id=?", (packet_id,))
             self.db.execute("UPDATE packets SET saved=0 WHERE saved=1 AND id NOT IN (SELECT id FROM packets WHERE saved=1 ORDER BY id DESC LIMIT 500)")
+
+    def stage_message(self, sender, recipient, text, utc=None):
+        with self.lock, self.db:
+            row = self.db.execute("INSERT INTO outbox(sender,recipient,text,status,created) "
+                                  "VALUES(?,?,?,'Send uncertain',COALESCE(datetime(?),CURRENT_TIMESTAMP))",
+                                  (sender, recipient, text, utc.isoformat() if utc else None))
+            self.db.execute("DELETE FROM outbox WHERE id NOT IN (SELECT id FROM outbox ORDER BY id DESC LIMIT 200)")
+            return row.lastrowid
+
+    def mark_message_sent(self, message_id):
+        with self.lock, self.db:
+            self.db.execute("UPDATE outbox SET status='Awaiting ACK' WHERE id=? AND status='Send uncertain'",
+                            (message_id,))
+
+    def outbox(self):
+        with self.lock:
+            return self.db.execute("SELECT recipient,text,status,created FROM outbox ORDER BY id DESC LIMIT 200").fetchall()
 
     def rows(self, view="traffic", limit=200):
         with self.lock:

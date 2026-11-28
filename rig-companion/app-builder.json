@@ -1,18 +1,19 @@
 {
   "package_name": "rig-companion-zero",
   "app_name": "Rig Companion",
-  "version": "0.2.3",
+  "version": "0.7.1",
   "bin_name": "rig-companion-zero",
-  "description": "TH-D75 radio controls, APRS messages and KISS bridges for CardputerZero.",
+  "description": "Radio controls, APRS, packet tools and a D-STAR reflector terminal for Kenwood and Benshi radios on CardputerZero.",
   "store": {
-    "summary": "TH-D75 Bluetooth controls, APRS inbox, weather and KISS bridges.",
-    "description": "Part of the Nomad tools by Tech Nomad Ted, TheTechNomad.com. Kenwood TH-D75 companion over Bluetooth: frequency, mode, power, squelch and volume controls with readback, native and KISS APRS receive, readable position/telemetry/weather reports, an APRS inbox with replies, a station map (OpenStreetMap tiles, cached for offline use) and optional BLE/TCP KISS bridges for phone or PC apps. Arrows move, Right opens, Left backs out; keys 4-8 switch pages, and in a packet Back, Map, Save, Reply, Raw.",
+    "summary": "TH-D75, UV-Pro and more: controls, APRS, packet, Winlink, D-STAR.",
+    "description": "Part of the Nomad tools by Tech Nomad Ted, TheTechNomad.com. Pick your radio (Kenwood TH-D75, TH-D74, TM-D750, or Benshi UV-Pro, GA-5WB, VR-N76 and relatives); every radio uses the same screens and keys. Over Bluetooth: frequency, mode, power, squelch and volume controls with readback, native and KISS APRS receive, readable position/telemetry/weather reports, an APRS inbox with replies, a station map (OpenStreetMap tiles, cached for offline use) and optional BLE/TCP KISS bridges for phone or PC apps. D-STAR Reflector Terminal (R): link REF, XRF, XLX and DCS reflectors through the TH-D75 over Bluetooth or USB, with a live who's-talking dashboard, last heard, echo test, D-PRS positions on the map, and callsign routing over QuadNet (direct calls, like a hotspot). Arrows move, Right opens, Left backs out; keys 4-8 switch pages, and in a packet Back, Map, Save, Reply, Raw.",
     "categories": [
       "Radio & Comms"
     ],
     "icon": "assets/icon.png",
     "screenshots": [
       "previews/radio.png",
+      "previews/dstar-live.png",
       "previews/traffic.png",
       "previews/message.png",
       "previews/weather.png"

@@ -26,3 +26,42 @@ Retrieved November 27, 2026. External source files are reference material and we
 - The map requests only currently visible tiles over HTTPS, identifies the app, honors caching headers and displays attribution. It does not prefetch regions. Previously viewed cached areas work offline; an uncached offline view shows station markers without geographic map detail.
 
 No aprs.fi code, branding, API or historical database is used. Full Linux APRS clients reviewed: https://github.com/Xastir/Xastir and https://www.ka2ddo.org/ka2ddo/YAAC.html . They remain separate apps, not bundled components.
+## Connected packet tools
+
+The connected AX.25, Winlink B2F, and YAPP cores under `native/` are reused from
+the Tab5 Rig Companion / HTCommander handoffs. They derive from HTCommander by
+Ylian Saint-Hilaire and contributors, pinned revision
+`50434c0369b404cca1fc72d8a4c1a58aa75e9f9c`. The original Apache 2.0 and Dart
+notices are included. `native/packet_backend.cpp` adapts those engines to
+the Cardputer Zero's Linux filesystem and shared radio worker.
+
+
+## D-STAR protocols and reflector lists
+
+- `rigzero/dstar.py` is Rig Companion code written from the public protocol
+  behaviour of MMDVMHost and ircDDBGateway (Jonathan Naylor G4KLX, GPL-2.0-or-later)
+  and DroidStar (Doug McLain AD8DP, GPL-3.0): MMDVM serial framing, D-STAR header
+  CRC, slow data, DExtra, DCS and DPlus packets, and the D-Plus registration ping.
+  No source files are copied.
+- `rigzero/dstar_route.py` (callsign routing) follows the ircDDB client and G2
+  behaviour of ircDDBGateway (ircDDB library by Michael Dirska DL1BFF and
+  Jonathan Naylor G4KLX, GPL-2.0-or-later). No source files are copied. It
+  connects to the QuadNet ircDDB server (ircv4.openquad.net:9007) at run time.
+- Reflector addresses are downloaded at run time from the Pi-Star host files
+  (https://www.pistar.uk/downloads/) and cached under `~/.cache/rig-companion-zero/dstar-hosts`.
+- Optional name / city lookups for US callsigns use https://callook.info (public FCC data).
+
+## Benshi radio protocol
+
+- `rigzero/benshi.py` drives BTECH, Radioddity, Vero and Radtel "Benshi" radios
+  over the Bluetooth GAIA serial service. The command numbers and record
+  layouts follow the public protocol documentation in benlink
+  (https://github.com/khusmann/benlink, Apache-2.0, Kyle Husmann) and
+  HTCommander (https://github.com/Ylianst/HTCommander, Apache-2.0,
+  Ylian Saint-Hilaire). No source files are copied.
+
+## Reflector locations
+
+- The Nearby reflector list looks up reflector server addresses with
+  ip-api.com's free batch endpoint (http://ip-api.com/batch, no key, at most
+  15 requests a minute, non-commercial use). Results are cached for 30 days.

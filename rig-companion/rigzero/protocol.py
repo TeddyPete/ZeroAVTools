@@ -59,17 +59,41 @@ def address(call: str, last: bool = False, repeated: bool = False) -> bytes:
     return bytes(ord(c) << 1 for c in base.ljust(6)) + bytes([0x60 | (int(ssid or 0) << 1) | last | (128 if repeated else 0)])
 
 
-def message_frame(source: str, recipient: str, text: str, path: str = "") -> bytes:
+def message_frame(source: str, recipient: str, text: str, path: str = "", message_id: str = "") -> bytes:
     if not valid_call(recipient) or not 1 <= len(text) <= 67:
         raise ValueError("Enter a recipient and 1–67 message characters")
     if any(ord(c) < 32 or ord(c) > 126 or c in "{|~" for c in text):
         raise ValueError("Use plain APRS text without {, | or ~")
+    if message_id and not re.fullmatch(r"[A-Za-z0-9]{1,5}", message_id):
+        raise ValueError("Invalid APRS message number")
+    suffix = "{" + message_id if message_id else ""
+    return aprs_frame(source, f":{recipient:<9}:{text}{suffix}", path)
+
+
+def aprs_frame(source: str, info: str, path: str = "") -> bytes:
     route = path.split(",") if path else []
     if len(route) > 2:
         raise ValueError("Use at most two APRS path entries")
     calls = ["APRS", source] + route
     headers = b"".join(address(call, i == len(calls) - 1) for i, call in enumerate(calls))
-    return headers + b"\x03\xf0" + f":{recipient:<9}:{text}".encode("ascii")
+    return headers + b"\x03\xf0" + info.encode("ascii")
+
+
+def position_frame(source: str, position: str, path: str = "") -> bytes:
+    """Create a fixed, uncompressed APRS position report."""
+    parts = position.split(",")
+    if len(parts) != 2 or any(not re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{1,8})?", part.strip()) for part in parts):
+        raise ValueError("Use decimal latitude, longitude")
+    lat, lon = (float(part) for part in parts)
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("Latitude or longitude out of range")
+
+    def coordinate(value, width, positive, negative):
+        degrees, hundredths = divmod(round(abs(value) * 6000), 6000)
+        return f"{degrees:0{width}d}{hundredths / 100:05.2f}{negative if value < 0 else positive}"
+
+    return aprs_frame(source, "!" + coordinate(lat, 2, "N", "S") + "/" +
+                      coordinate(lon, 3, "E", "W") + "-", path)
 
 
 def decode_ax25(raw: bytes):

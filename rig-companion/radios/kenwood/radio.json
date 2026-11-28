@@ -1,0 +1,18 @@
+{
+  "id": "kenwood",
+  "name": "Kenwood",
+  "version": "1.0.0",
+  "driver": "driver.py",
+  "transports": ["bluetooth", "usb"],
+  "bluetooth_service": "spp",
+  "usb_baud": 9600,
+  "detects_model": true,
+  "radios": [
+    {"key": "TH-D75", "name": "Kenwood TH-D75", "prefixes": ["TH-D75"],
+     "features": ["controls", "tune", "aprs", "kiss", "packet", "dstar", "gps"]},
+    {"key": "TH-D74", "name": "Kenwood TH-D74", "prefixes": ["TH-D74"],
+     "features": ["aprs", "kiss", "packet"]},
+    {"key": "TM-D750", "name": "Kenwood TM-D750", "prefixes": ["TM-D750"],
+     "features": ["aprs", "kiss", "packet"]}
+  ]
+}

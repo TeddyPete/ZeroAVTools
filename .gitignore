@@ -4,3 +4,4 @@ out/
 device_report.txt
 build/
 dist/
+rig-companion/rigzero/libpacket.so

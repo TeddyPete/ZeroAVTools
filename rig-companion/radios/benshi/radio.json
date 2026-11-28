@@ -1,0 +1,21 @@
+{
+  "id": "benshi",
+  "name": "Benshi (BTECH, Radioddity, Vero, Radtel)",
+  "version": "1.0.0",
+  "driver": "driver.py",
+  "transports": ["bluetooth"],
+  "bluetooth_service": "gaia",
+  "detects_model": false,
+  "radios": [
+    {"key": "UV-Pro", "name": "BTECH UV-Pro / UV-50Pro", "prefixes": ["UV-PRO", "UV-50PRO", "UV PRO"],
+     "features": ["controls", "aprs", "kiss", "packet"]},
+    {"key": "GA-5WB", "name": "Radioddity GA-5WB / DB50-B", "prefixes": ["GA-5WB", "DB50"],
+     "features": ["controls", "aprs", "kiss", "packet"]},
+    {"key": "VR-N76", "name": "Vero VR-N76 / N75", "prefixes": ["VR-N76", "VR-N75"],
+     "features": ["controls", "aprs", "kiss", "packet"]},
+    {"key": "VR-N7500", "name": "Vero VR-N7500 / N7600", "prefixes": ["VR-N7500", "VR-N7600"],
+     "features": ["controls", "aprs", "kiss", "packet"]},
+    {"key": "RT-660", "name": "Radtel RT-660", "prefixes": ["RT-660"],
+     "features": ["controls", "aprs", "kiss", "packet"]}
+  ]
+}

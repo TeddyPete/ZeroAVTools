@@ -16,8 +16,9 @@ FO = "FO 0,0144390000,0000600000,0,A,0,0,1,1,0,0,0,0,1,08,12,000,0,CQCQCQ,0,00"
 
 
 class FakeRadio:
-    def __init__(self, connection):
+    def __init__(self, connection, model="TH-D75"):
         self.connection = connection
+        self.model = model
         self.connection.settimeout(.05)
         self.fo, self.vm, self.rate, self.tn = FO, "VM 0,0", "AS 0", "TN 1,0"
         self.commands = []
@@ -49,7 +50,7 @@ class FakeRadio:
                     line.clear()
                     self.commands.append(command)
                     if command == "ID":
-                        answer = "ID TH-D75"
+                        answer = "ID " + self.model
                     elif command == "FO 0":
                         answer = self.fo
                     elif command.startswith("FO 0,"):

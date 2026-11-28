@@ -24,7 +24,8 @@ class Display:
         self.surface = pygame.Surface((320, 170))
         path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        self.fonts = {12: pygame.font.Font(path, 12), 14: pygame.font.Font(path, 14),
+        body = pygame.font.Font(path, 14)
+        self.fonts = {12: body, 14: body,
                       17: pygame.font.Font(bold, 17), 23: pygame.font.Font(path, 23)}
         self.framebuffer = None
         self.previous = None
@@ -58,10 +59,14 @@ class Display:
     def header(self, title, status=""):
         self.surface.fill(BG)
         self.rect(0, 0, 320, 25, HEADER)
-        self.text(title, 9, 3, INK, 17, 230)
+        title_width = 230
         if status:
             image = self.fonts[12].render(status, True, ACCENT)
-            self.surface.blit(image, (312 - image.get_width(), 6))
+            status_x = 312 - image.get_width()
+            title_width = max(0, min(title_width, status_x - 17))
+            self.surface.blit(image, (status_x, 5))
+        if title_width:
+            self.text(title, 9, 3, INK, 17, title_width)
         self.rect(8, 25, 304, 1, LINE)
 
     def footer(self, active=None, labels=None):
@@ -74,7 +79,7 @@ class Display:
                 self.rect(center - 26, 147, 52, 23, SELECT)
                 self.rect(center - 16, 168, 32, 2, INK)
             image = self.fonts[12].render(label, True, color)
-            self.surface.blit(image, (center - image.get_width() // 2, 151))
+            self.surface.blit(image, (center - image.get_width() // 2, 150))
 
     def wrap(self, text, x=10, y=43, width=300, height=98, color=INK, offset=0):
         lines = []
@@ -82,8 +87,15 @@ class Display:
             line = ""
             for char in paragraph:
                 if self.fonts[14].size(line + char)[0] > width:
-                    lines.append(line)
-                    line = ""
+                    cut = line.rfind(" ")
+                    if cut > 0 and char != " ":
+                        lines.append(line[:cut])
+                        line = line[cut + 1:]
+                    else:
+                        lines.append(line)
+                        line = ""
+                    if char == " " and not line:
+                        continue
                 line += char
             lines.append(line)
         for row, line in enumerate(lines[offset:offset + height // 17]):

@@ -5,7 +5,7 @@ from . import __version__
 
 APP_NAME = "Rig Companion"
 LICENSE = "GPL-3.0"
-DEVELOPER = "TheTechNomad"
+DEVELOPER = "Ted Peterson"
 WEBSITE = "www.TheTechNomad.com"
 GITHUB = "github.com/TeddyPete"
 
@@ -62,8 +62,9 @@ def draw_about(display, accent, ink, dim):
     qx = 320 - side - 6
     draw_qr(display.surface, qx, 30, cell)
     width = qx - 16
-    display.text(APP_NAME, 10, 31, accent, 17, width)
-    display.text(f"Version {__version__} · {LICENSE} License", 10, 55, dim, 12, width)
-    for i, line in enumerate((f"Developed by {DEVELOPER}", WEBSITE, GITHUB)):
-        display.text(line, 10, 77 + i * 19, ink, 12, width)
+    display.text(APP_NAME, 10, 30, accent, 17, width)
+    lines = ((f"Version {__version__}", dim), (f"{LICENSE} License", dim),
+             (f"Developer: {DEVELOPER}", ink), (WEBSITE, ink), (GITHUB, ink))
+    for i, (line, color) in enumerate(lines):
+        display.text(line, 10, 54 + i * 18, color, 12, width)
     display.text("Scan for the website · Esc back", 10, 149, dim, 12)
