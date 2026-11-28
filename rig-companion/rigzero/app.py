@@ -23,22 +23,25 @@ from .dstar_ui import DStarTools
 from .display import ACCENT, ALERT, BG, DIM, INK, LINE, PANEL, SELECT, SELECT_DIM, Display, Keyboard
 from .gps_clock import LIVE_SECONDS
 from .protocol import MODES, POWERS, valid_call
-from .models import DEFAULT_RADIO, RADIOS, has_feature, radio_info
-from .radio import Radio
+from . import drivers
+from .models import radio_info
+from .radio import IdleRadio, Radio
 from .storage import Store
+from .usbserial import usb_ports
 
 PAGES = ("Radio", "APRS", "Inbox", "Weather", "Link")
 
 
-def make_radio(store, link, key=None):
-    """Start the worker for the chosen radio. Every driver has the same interface."""
-    info = radio_info(key or store.get("radio_model", None) or DEFAULT_RADIO)
+def make_radio(store, link, package_id=None, model=None):
+    """Start the worker from the chosen radio package; only that driver is imported."""
+    package = drivers.find(package_id or store.get("radio_package", None) or "")
+    if not package:
+        return IdleRadio(store, link)
     if link:
-        link.family = info["family"]
-    if info["family"] == "benshi":
-        from .benshi import BenshiRadio
-        return BenshiRadio(store, link, info["key"])
-    return Radio(store, link)
+        link.package = package
+    model = model or store.get("radio_model", None)
+    model = radio_info(package, model)["key"]
+    return drivers.load(package)(store, link, model, package)
 
 
 class App:
@@ -75,51 +78,63 @@ class App:
         self.panels = Panels(self)
         self.packet = PacketTools(self)
         self.dstar = DStarTools(self)
-        self.picker = None          # radio picker: index of the highlighted radio
+        self.picker = None          # splash screen: index of the highlighted radio package
+        self.packages = []
 
     def first_start(self):
-        """Ask which radio on the very first start; existing TH-D75 users keep theirs."""
-        if self.store.get("radio_model", None) is None:
-            if self.store.get("device", None):
-                self.store.set("radio_model", DEFAULT_RADIO)
-            else:
-                self.open_picker()
+        """Splash screen: list the installed radio packages and load only the one chosen."""
+        self.open_picker()
 
-    # ------------------------------------------------------------------ radio choice
+    @property
+    def package(self):
+        return getattr(self.radio, "package", None) or drivers.find(self.store.get("radio_package", None) or "")
+
     @property
     def radio_key(self):
-        return self.store.get("radio_model", None) or DEFAULT_RADIO
+        """The model in use: what the radio reported, else the package's first radio."""
+        package = self.package
+        model = self.radio.snapshot().get("model") if self.radio else ""
+        return radio_info(package, model or self.store.get("radio_model", None))["key"]
 
     @property
     def family(self):
-        return radio_info(self.radio_key)["family"]
+        package = self.package
+        return package["id"] if package else ""
 
     def feature(self, name):
-        return has_feature(self.radio_key, name)
+        return name in radio_info(self.package, self.radio_key).get("features", ())
+
+    def transports(self):
+        return (self.package or {}).get("transports", ["bluetooth"])
 
     def open_picker(self):
-        keys = [radio["key"] for radio in RADIOS]
-        self.picker = keys.index(self.radio_key) if self.radio_key in keys else 0
+        self.packages = drivers.installed()
+        ids = [package["id"] for package in self.packages]
+        current = self.store.get("radio_package", None)
+        self.picker = ids.index(current) if current in ids else 0
         self.dirty = True
 
     def press_picker(self, name, char):
         key = (char or "").lower()
         name = {"f": "up", "x": "down", "z": "left", "c": "right"}.get(key, name)
+        if not self.packages:
+            if name in ("esc", "left", "enter"):
+                self.picker = None
+            return
         if name in ("up", "down"):
-            self.picker = (self.picker + (1 if name == "down" else -1)) % len(RADIOS)
+            self.picker = (self.picker + (1 if name == "down" else -1)) % len(self.packages)
         elif name in ("enter", "right"):
-            chosen = RADIOS[self.picker]["key"]
+            chosen = self.packages[self.picker]
             self.picker = None
-            self.choose_radio(chosen)
+            self.choose_package(chosen)
         elif name in ("esc", "left"):
-            if self.store.get("radio_model", None) is None:
-                self.store.set("radio_model", DEFAULT_RADIO)
+            if isinstance(self.radio, IdleRadio):
+                self.editor = "quit"        # nothing loaded yet: Esc leaves, like the HOME screen
             self.picker = None
 
-    def choose_radio(self, key):
-        """Switch drivers. Same screens and keys; the new radio loads its own controls."""
-        first = self.store.get("radio_model", None) is None
-        if key == self.radio_key and not first:
+    def choose_package(self, package):
+        """Load the chosen radio package. Same screens and keys; the radio brings its own controls."""
+        if package["id"] == self.family and not isinstance(self.radio, IdleRadio):
             return
         state = self.radio.snapshot()
         if state["kiss"] or getattr(self.radio, "native", None) or getattr(self.radio, "suspended", ""):
@@ -128,47 +143,52 @@ class App:
         if self.store.get("recovery", None):
             self.tell("Restore the previous KISS session first")
             return
-        previous = self.radio_key
-        self.store.set("radio_model", key)
-        if key == previous and not first:
-            return
-        if not first:
+        previous = self.store.get("radio_package", None)
+        if previous is not None and previous != package["id"]:
             self.store.set("device", None)      # the paired device belongs to the old radio
-        old = self.radio
-        self.flash_loading("Loading " + key + " controls")
+            self.store.set("radio_model", None)
+        self.flash_loading("Loading " + package["name"].split(" (")[0], "Radio package " + package.get("version", ""))
         try:
-            old.close()
-        except RuntimeError as error:
-            self.store.set("radio_model", previous)
+            self.radio.close()
+            radio = make_radio(self.store, self.link, package["id"])
+        except Exception as error:
             self.loaded()
-            self.tell(error)
+            self.tell(f"Could not load {package['name']}: {error}")
             return
-        self.radio = make_radio(self.store, self.link, key)
+        self.store.set("radio_package", package["id"])
+        self.radio = radio
         if self.ble:
-            self.ble.radio = self.radio
+            self.ble.radio = radio
         if self.tcp:
-            self.tcp.radio = self.radio
+            self.tcp.radio = radio
         self.devices = []
-        self.page = 4
-        self.link_selected = 1
         self.loaded()
-        self.tell(radio_info(key)["name"] + " chosen. Find it to pair.")
+        if not self.store.get("device", None):
+            self.page = 4
+            self.link_selected = 1
+            self.tell("Find your radio to pair, or plug in USB")
 
     def draw_picker(self):
         d = self.display
-        d.header("Choose your radio", f"{self.picker + 1}/{len(RADIOS)}")
-        start = max(0, min(self.picker - 1, len(RADIOS) - 4))
-        for row, radio in enumerate(RADIOS[start:start + 4]):
+        packages = self.packages
+        d.header("Rig Companion", "Choose radio")
+        if not packages:
+            d.text("No radio packages installed", 10, 40, INK, 17)
+            d.wrap("Install one from the app store, such as Rig Companion Kenwood. Esc leaves.", y=68, height=60, color=DIM)
+            return
+        start = max(0, min(self.picker - 1, len(packages) - 3))
+        for row, package in enumerate(packages[start:start + 3]):
             index = start + row
-            y = 30 + row * 28
+            y = 30 + row * 37
             chosen = index == self.picker
             if chosen:
-                d.rect(7, y, 306, 26, SELECT, 3)
-            d.text(radio["name"], 14, y + 4, INK, 14, 220)
-            mark = "In use" if radio["key"] == self.radio_key and self.store.get("radio_model", None) else \
-                ("D-STAR" if "dstar" in radio["features"] else radio["family"].title())
-            d.text(mark, 240, y + 6, INK if chosen else DIM, 12, 70)
-        d.text("Enter choose  ·  Esc back  ·  F/X move", 10, 148, DIM, 12, 302)
+                d.rect(7, y, 306, 35, SELECT, 3)
+            d.text(package["name"].split(" (")[0], 14, y + 2, INK, 14, 210)
+            d.text(drivers.summary(package), 14, y + 19, INK if chosen else DIM, 12, 210)
+            mark = "Last used" if package["id"] == self.store.get("radio_package", None) else \
+                " + ".join(t.upper() if t == "usb" else "BT" for t in package.get("transports", ()))
+            d.text(mark, 236, y + 11, INK if chosen else DIM, 12, 74)
+        d.text("Enter load  ·  F/X move  ·  Esc back", 10, 148, DIM, 12, 302)
 
     def tell(self, message):
         self.notice = str(message)
@@ -300,7 +320,8 @@ class App:
             if self.scan_active and time.monotonic() > self.scan_until:
                 self.scan_active = False
                 def finish_scan():
-                    self.devices = self.link.devices()
+                    bluetooth = self.link.devices() if "bluetooth" in self.transports() else []
+                    self.devices = self.usb_devices() + bluetooth
                     adapter = getattr(self.link, "scanning_adapter", None)
                     if adapter:
                         adapter.StopDiscovery()
@@ -319,9 +340,16 @@ class App:
         if not valid_call(self.store.get("callsign")):
             self.tell("Set your callsign under Link before sending")
 
+    def usb_devices(self):
+        return usb_ports() if "usb" in self.transports() else []
+
     def start_scan(self):
+        if isinstance(self.radio, IdleRadio):
+            self.open_picker()
+            return
         if not self.link:
-            self.tell("Bluetooth is unavailable in this preview")
+            self.devices = self.usb_devices()
+            self.tell("Bluetooth is unavailable here" if not self.devices else "USB ports listed")
             return
         if self.family == "kenwood":
             self.show_steps("pair", "Pair the " + self.radio_key, (
@@ -329,7 +357,7 @@ class App:
                 "Menu 934 Pairing Mode (the radio waits for this scan)",
                 "Pick the " + self.radio_key + " in the list here",
                 "Check both screens show the same number, then accept"),
-                note="Only needed once. Esc or Enter closes this; the scan keeps running.")
+                note="Only needed once. A USB cable works too: plug it in and pick the USB entry.")
         else:
             self.show_steps("pair_" + self.family, "Pair the " + self.radio_key, (
                 "Turn the radio on with Bluetooth enabled",
@@ -339,8 +367,11 @@ class App:
                 note="Only needed once. Esc or Enter closes this; the scan keeps running.")
         self.scan_active = True
         self.scan_until = time.monotonic() + 8
-        self.devices = []
-        self.background(self.link.scan)
+        self.devices = self.usb_devices()
+        if "bluetooth" in self.transports():
+            self.background(self.link.scan)
+        else:
+            self.scan_until = time.monotonic()
 
     def reply(self):
         if self.detail:
@@ -532,8 +563,9 @@ class App:
                 self.link_action(action, state)
 
     def link_options(self):
-        options = [("Radio  " + radio_info(self.radio_key)["name"], "pick_radio"),
-                   ("Find " + self.radio_key + " / pair", "scan")]
+        name = self.package["name"].split(" (")[0] if self.package else "Choose"
+        find = "Find " + self.radio_key + (" / pair / USB" if "usb" in self.transports() else " / pair")
+        options = [("Radio package  " + name, "pick_radio"), (find, "scan")]
         if self.feature("gps"):
             options.append(("GPS time from " + self.radio_key, "gps_time"))
         options.append(("Field Manual", "guide"))
@@ -960,7 +992,7 @@ def main():
     display.flush()
     store = Store(folder)
     link = BluetoothLink()
-    radio = make_radio(store, link)
+    radio = IdleRadio(store, link)        # the splash screen loads the chosen radio package
     keyboard = Keyboard()
     app = App(store, radio, display, link)
     app.first_start()

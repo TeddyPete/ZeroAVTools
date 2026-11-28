@@ -17,7 +17,7 @@ class BluetoothLink:
         self.events = queue.Queue(maxsize=32)
         self.waiting_confirmation = None
         self.pair_target = "TH-D75"
-        self.family = None          # "kenwood" or "benshi": which radios scans list
+        self.package = None         # the chosen radio package: which radios scans list
         self.radio_device = None
         self.socket = None
         self.bus = None
@@ -175,7 +175,7 @@ class BluetoothLink:
         for path, interfaces in self.objects().items():
             props = interfaces.get("org.bluez.Device1", {})
             name = str(props.get("Alias", props.get("Name", "")))
-            if discovery_candidate(name, props.get("UUIDs", ()), self.family):
+            if discovery_candidate(name, props.get("UUIDs", ()), self.package):
                 devices.append({"path": str(path), "name": name, "address": str(props["Address"]),
                                 "paired": bool(props.get("Paired", False))})
         return devices

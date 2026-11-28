@@ -1,7 +1,7 @@
 {
   "package_name": "rig-companion-zero",
   "app_name": "Rig Companion",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "bin_name": "rig-companion-zero",
   "description": "Radio controls, APRS, packet tools and a D-STAR reflector terminal for Kenwood and Benshi radios on CardputerZero.",
   "store": {

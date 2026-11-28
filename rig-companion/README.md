@@ -1,9 +1,32 @@
 # Rig Companion for CardputerZero
 
+## 0.7.0 Radio packages, splash screen and USB CAT
+
+Radios are now separate packages. At launch a splash screen lists the radio
+packages that are installed, and Rig Companion loads only the one you pick.
+Change it later under **Link > Radio package**.
+
+| Package | Debian package | Radios | Links |
+|---|---|---|---|
+| Kenwood | `rig-companion-zero-radio-kenwood` | TH-D75, TH-D74, TM-D750 | Bluetooth or USB cable |
+| Benshi | `rig-companion-zero-radio-benshi` | UV-Pro, GA-5WB, VR-N76/N75/N7500/N7600, RT-660 | Bluetooth |
+
+A radio package is a folder under
+`/usr/share/APPLaunch/lib/rig-companion-zero/radios/<id>/` with a `radio.json`
+(the radios, their features, Bluetooth service, USB baud rate) and a
+`driver.py` that defines `Driver`, a subclass of `rigzero.radio.Radio`. New
+brands (Yaesu, Icom...) are added the same way. `python3 package.py` builds the
+app and every package under `radios/`.
+
+**USB CAT.** Packages that list `usb` show plugged-in USB serial ports
+(`/dev/serial/by-id`, `ttyACM`, `ttyUSB`) under **Link > Find ... / USB** next to
+Bluetooth radios. No root is needed; the pi user is in the dialout group.
+
+The About screen now reads "Developer: Ted Peterson" and fits the screen.
+
 ## 0.6.0 Choose your radio
 
-Rig Companion now drives more than one radio. Pick yours on first start, or
-later under **Link > Radio**. Each radio loads its own controls, but the screens,
+Rig Companion now drives more than one radio. (Replaced by radio packages in 0.7.0.) Each radio loads its own controls, but the screens,
 layout and keys stay the same.
 
 | Radio | Driver | What works |

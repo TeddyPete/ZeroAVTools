@@ -14,9 +14,9 @@ from __future__ import annotations
 import socket
 import time
 
-from .models import GAIA_UUID, radio_info
-from .protocol import MODES, decode_ax25
-from .radio import Radio
+from rigzero.models import GAIA_UUID
+from rigzero.protocol import MODES, decode_ax25
+from rigzero.radio import Radio
 
 GROUP_BASIC = 2
 
@@ -195,12 +195,12 @@ class Reassembler:
         return None
 
 
-class BenshiRadio(Radio):
+class Driver(Radio):
     """Benshi family driver behind the same worker interface as the Kenwood `Radio`."""
 
     family = "benshi"
 
-    def __init__(self, store, link=None, model="UV-Pro"):
+    def __init__(self, store, link=None, model="UV-Pro", package=None):
         self.model_key = model
         self.buffer = bytearray()
         self.replies = {}
@@ -209,12 +209,13 @@ class BenshiRadio(Radio):
         self.channel_count = 32
         self.reassembler = Reassembler()
         super().__init__(store, link)
-        self.update(model="", status="Choose your " + radio_info(model)["name"].split(" / ")[0] + " under Link")
+        self.package = package or {}
+        self.update(model="", status="Find your " + model + " under Link")
 
     # ---------------------------------------------------------------- link
     def _connect(self, device):
         self.update(status="Connecting to " + self.model_key)
-        self.connection = self.link.connect(device, GAIA_UUID)
+        self.connection = self.open_link(device, GAIA_UUID)
         self.device_address = device["address"]
         self.buffer.clear()
         self.replies.clear()

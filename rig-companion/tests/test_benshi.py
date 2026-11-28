@@ -4,9 +4,16 @@ import time
 import unittest
 from pathlib import Path
 
-from rigzero import benshi
+from rigzero import drivers
 from rigzero.app import make_radio
-from rigzero.models import discovery_candidate, has_feature, radio_info
+from rigzero.models import discovery_candidate, radio_info
+from rigzero.usbserial import SerialPort
+
+BENSHI = drivers.find("benshi")
+KENWOOD = drivers.find("kenwood")
+drivers.load(BENSHI)
+import sys
+benshi = sys.modules["rig_companion_radio_benshi"]
 from rigzero.protocol import decode_ax25, message_frame
 from rigzero.storage import Store
 
@@ -87,7 +94,7 @@ class FakeRadioSocket:
 
 class FakeLink:
     def __init__(self):
-        self.family = None
+        self.package = None
         self.socket = FakeRadioSocket()
         self.service = None
 
@@ -132,17 +139,54 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(status["rssi"], 12)
 
 
-class PickerModelTests(unittest.TestCase):
-    def test_features(self):
-        self.assertTrue(has_feature("TH-D75", "dstar"))
-        self.assertFalse(has_feature("UV-Pro", "dstar"))
-        self.assertEqual(radio_info("VR-N76")["family"], "benshi")
+class PackageTests(unittest.TestCase):
+    def test_installed_packages_kenwood_first(self):
+        ids = [package["id"] for package in drivers.installed()]
+        self.assertEqual(ids[0], "kenwood")
+        self.assertIn("benshi", ids)
 
-    def test_discovery_by_family(self):
-        self.assertTrue(discovery_candidate("UV-PRO", (), "benshi"))
-        self.assertFalse(discovery_candidate("UV-PRO", (), "kenwood"))
-        self.assertTrue(discovery_candidate("TH-D75A", (), "kenwood"))
-        self.assertTrue(discovery_candidate("Radio", ("00001107-D102-11E1-9B23-00025B00A5A5",), "benshi"))
+    def test_features(self):
+        self.assertIn("dstar", radio_info(KENWOOD, "TH-D75")["features"])
+        self.assertNotIn("dstar", radio_info(BENSHI, "UV-Pro")["features"])
+        self.assertEqual(radio_info(BENSHI, "nope")["key"], "UV-Pro")
+
+    def test_discovery_by_package(self):
+        self.assertTrue(discovery_candidate("UV-PRO", (), BENSHI))
+        self.assertFalse(discovery_candidate("UV-PRO", (), KENWOOD))
+        self.assertTrue(discovery_candidate("TH-D75A", (), KENWOOD))
+        self.assertTrue(discovery_candidate("Radio", ("00001107-D102-11E1-9B23-00025B00A5A5",), BENSHI))
+
+    def test_only_chosen_driver_loads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = Store(Path(temp))
+            sys.modules.pop("rig_companion_radio_kenwood", None)
+            store.set("radio_package", "benshi")
+            radio = make_radio(store, None)
+            self.assertNotIn("rig_companion_radio_kenwood", sys.modules)
+            self.assertEqual(radio.family, "benshi")
+            radio.close()
+            store.set("radio_package", "nothing")
+            self.assertEqual(type(make_radio(store, None)).__name__, "IdleRadio")
+            store.close()
+
+
+class UsbSerialTests(unittest.TestCase):
+    def test_pty_round_trip(self):
+        import os
+        import pty
+        master, slave = pty.openpty()
+        port = SerialPort(os.ttyname(slave), 9600)
+        try:
+            port.sendall(b"ID\r")
+            self.assertEqual(os.read(master, 16), b"ID\r")
+            os.write(master, b"ID TH-D75\r")
+            self.assertEqual(port.recv(64), b"ID TH-D75\r")
+            with self.assertRaises(socket.timeout):
+                port.recv(64)
+        finally:
+            port.close()
+            os.close(master)
+            os.close(slave)
 
 
 class DriverTests(unittest.TestCase):
@@ -151,7 +195,7 @@ class DriverTests(unittest.TestCase):
         self.store = Store(Path(self.temp.name))
         self.store.set("callsign", "N0TNT")
         self.link = FakeLink()
-        self.radio = make_radio(self.store, self.link, "UV-Pro")
+        self.radio = make_radio(self.store, self.link, "benshi", "UV-Pro")
 
     def tearDown(self):
         self.radio.close()
@@ -168,7 +212,7 @@ class DriverTests(unittest.TestCase):
         return self.radio.snapshot()
 
     def test_connect_controls_and_aprs(self):
-        self.assertEqual(self.link.family, "benshi")
+        self.assertEqual(self.link.package["id"], "benshi")
         state = self.run_action("connect", {"address": "38:D2:00:00:00:01", "name": "UV-PRO", "paired": True, "path": "/x"})
         self.assertEqual(self.link.service, benshi.GAIA_UUID)
         self.assertTrue(state["connected"] and state["identity"], state)

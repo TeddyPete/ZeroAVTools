@@ -13,6 +13,7 @@ def render_previews(folder: Path):
     with tempfile.TemporaryDirectory(prefix="rig-zero-preview-") as temp:
         store = Store(Path(temp))
         store.set("callsign", "N0CALL-7")
+        store.set("radio_package", "kenwood")
         store.record(inspect_packet("N0WX-1", "APRS", "WIDE1-1", "_11061542c315s012g023t041r003h74b10182"))
         store.record(inspect_packet("N0TEST-5", "APRS", "", ":N0CALL-7 :Hello from the trail"))
         store.record(inspect_packet("N0TEST-9", "APRS", "WIDE1-1", "!4503.79N/09309.32W-Portable station"))
@@ -74,9 +75,13 @@ def render_previews(folder: Path):
         app.draw()
         screen.save(folder / "disconnected.png")
         app.open_picker()
-        app.picker = 3
         app.draw()
         screen.save(folder / "radio-picker.png")
+        app.picker = None
+        app.editor = "about"
+        app.draw()
+        screen.save(folder / "about.png")
+        app.editor = None
         app.picker = None
         radio.close()
         render_benshi(app, screen, store, folder)
@@ -88,9 +93,10 @@ def render_previews(folder: Path):
 def render_benshi(app, screen, store, folder):
     """A UV-Pro on the same Radio and Link screens (no Bluetooth; state only)."""
     import time
-    from .benshi import BenshiRadio
-    store.set("radio_model", "UV-Pro")
-    radio = BenshiRadio(store, None, "UV-Pro")
+    from . import drivers
+    package = drivers.find("benshi")
+    store.set("radio_package", "benshi")
+    radio = drivers.load(package)(store, None, "UV-Pro", package)
     radio.update(identity=True, connected=True, model="UV-Pro", volume=6, dual=1)
     radio.identified_at = time.monotonic()
     radio.state["bands"] = [{"hz": 144390000, "mode": 0, "power": 0, "channel": 1, "squelch": 3,

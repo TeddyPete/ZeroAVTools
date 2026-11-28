@@ -9,7 +9,8 @@ import threading
 import time
 from decimal import Decimal, InvalidOperation
 
-from .models import model_from_id
+from .models import SPP_UUID, model_from_id
+from .usbserial import SerialPort, usb_present
 from .gps_clock import GpsClock
 from .packet_native import Engine, md5, milliseconds
 from .protocol import (KissDecoder, MODES, STEPS, decode_ax25, decode_tnc2, fo_frequency,
@@ -51,6 +52,21 @@ class Radio:
         self.suspended = ""         # another feature (D-STAR gateway) is using the radio link
         self.thread = threading.Thread(target=self._run, name="rig-radio", daemon=True)
         self.thread.start()
+
+    def open_link(self, device, service=SPP_UUID):
+        """Bluetooth (via BlueZ) or a USB serial port, both with socket-style recv/sendall."""
+        if device.get("usb"):
+            return SerialPort(device["usb"], getattr(self, "usb_baud", 9600))
+        if not self.link:
+            raise RuntimeError("Bluetooth is unavailable")
+        return self.link.connect(device, service) if service != SPP_UUID else self.link.connect(device)
+
+    def drop_link(self):
+        connection = self.connection
+        if isinstance(connection, SerialPort):
+            connection.close()
+        elif self.link:
+            self.link.disconnect()
 
     def snapshot(self):
         with self.lock:
@@ -575,7 +591,7 @@ class Radio:
                 raise RuntimeError("Reconnect the original radio to restore")
         self.state["status"] = "Connecting to Kenwood radio"
         self.gps_clock.break_stream()
-        self.connection = self.link.connect(device)
+        self.connection = self.open_link(device)
         self.device_address = device["address"]
         with self.lock:
             for band in self.state["bands"]:
@@ -632,7 +648,7 @@ class Radio:
                         raise RuntimeError("Disconnect Terminal or Winlink before changing radios")
                     if self.connection:
                         self.end_kiss()
-                        self.link.disconnect()
+                        self.drop_link()
                         self.connection = None
                         self.update(connected=False, identity=False)
                     self._connect(*args)
@@ -665,8 +681,11 @@ class Radio:
                     next_connect = time.monotonic() + 8
                     device = self.store.get("device", None)
                     if device:
-                        devices = self.link.devices()
-                        match = next((d for d in devices if d["address"] == device["address"]), None)
+                        if device.get("usb"):
+                            match = device if usb_present(device) else None
+                        else:
+                            devices = self.link.devices()
+                            match = next((d for d in devices if d["address"] == device["address"]), None)
                         if match:
                             self._connect(match)
             except TimeoutError as error:
@@ -689,8 +708,7 @@ class Radio:
                     self.end_kiss()
         except Exception as error:
             self.update(error=f"Restore pending on reconnect: {error}")
-        if self.link:
-            self.link.disconnect()
+        self.drop_link()
         self.closed = True
 
     def suspend(self, reason, dv_band=None):
@@ -716,8 +734,8 @@ class Radio:
                 note = f"Could not set DV mode ({error}). "
         self.stop_beacon()
         self.remote_reply = None
-        if self.connection and self.link:
-            self.link.disconnect()
+        if self.connection:
+            self.drop_link()
         self.connection = None
         self.suspended = reason
         self.gps_clock.break_stream()
@@ -737,8 +755,7 @@ class Radio:
         self.gps_clock.break_stream()
         self.stop_beacon()
         self.remote_reply = None
-        if self.link:
-            self.link.disconnect()
+        self.drop_link()
         self.connection = None
         self.device_address = None
         self.update(connected=False, identity=False, kiss=False, owner="", packet_band=None,
@@ -791,3 +808,37 @@ class Radio:
         if not self.closed:
             raise RuntimeError("Waiting for radio restoration. Exit again after it completes.")
 
+
+
+class IdleRadio:
+    """Stand-in until a radio package is chosen on the splash screen. Loads nothing."""
+
+    family = ""
+    model_key = ""
+    suspended = ""
+    native = None
+    closed = True
+
+    def __init__(self, store=None, link=None):
+        self.state = {"connected": False, "identity": False, "status": "Choose your radio", "active": 0,
+                      "dual": -1, "volume": -1, "kiss": False, "owner": "", "rx": 0, "tx": 0, "invalid": 0,
+                      "last_rx": "", "error": "", "model": "", "packet_band": None, "packet_hz": 0,
+                      "packet_rate": None, "beacon_armed": False, "session_id": 0, "native_tnc": None,
+                      "native_rate": None, "packet_link": "Idle", "packet_peer": "", "packet_log": [],
+                      "bands": [{"hz": 0, "mode": -1, "power": -1, "channel": -1, "squelch": -1,
+                                 "meter": -1, "busy": -1} for _ in range(2)]}
+
+    def snapshot(self):
+        result = copy.deepcopy(self.state)
+        result["fresh"] = False
+        return result
+
+    def update(self, **values):
+        self.state.update(values)
+
+    def submit(self, action, *args):
+        self.state["error"] = "Choose your radio first"
+        return False
+
+    def close(self):
+        pass
