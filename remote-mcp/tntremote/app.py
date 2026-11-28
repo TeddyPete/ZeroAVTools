@@ -89,6 +89,11 @@ class Screen:
     def typing(self) -> bool:
         return False
 
+    def loading(self) -> str:
+        """While this screen waits on something slow: what it is ("" = not
+        loading). The app draws the Loading popup over the screen then."""
+        return ""
+
     def nrows(self) -> int:
         return T.ROWS_KEYS if any(self.keys()) else T.ROWS
 
@@ -684,6 +689,13 @@ class ConnectorScreen(QRScreen):
                 return "", "No address set. Setup > Address (your workers.dev or domain address).", T.WARN
         if not base or st.get("tunnel") != "connected":
             return "", f"Waiting for the tunnel... {st.get('tunnel', '')} {st.get('tunnel_detail', '')}".strip(), T.WARN
+
+    def loading(self):
+        app = self.app
+        st, cfg = app.status, app.cfg
+        if not app.on or cfg.get("tunnel_kind") == "cloudflare":
+            return ""
+        return "" if st.get("tunnel") == "connected" and st.get("public_url") else "Starting the tunnel"
         extra = ("\nThis test address changes every time the device restarts." if cfg.get("tunnel_kind") == "quick" else "")
         return base + "/mcp", "Add as a custom connector (MCP server) in Claude, ChatGPT or Codex:\n" + base + "/mcp" + extra, T.FG
 
@@ -1007,6 +1019,9 @@ class NgrokTokenScreen(QRScreen):
     def saved(self):
         self.done = True
 
+    def loading(self):
+        return "Downloading ngrok" if self.done and self.install == "installing" else ""
+
     def content(self):
         if self.done and not self.install:
             app = self.app
@@ -1183,11 +1198,17 @@ class App:
 
     def busy(self, label: str, fn) -> None:
         scr = TextScreen(self, label, [("Working...", T.DIM)])
+        scr.t0 = time.monotonic()
+        scr.loading = lambda: label        # Loading popup until fn() is done
         self.push(scr)
 
         def run():
-            res = fn()
+            try:
+                res = fn()
+            except Exception as e:       # noqa: BLE001  show it, don't leave the popup up
+                res = f"Failed: {e}"
             scr._lines = [(l, T.OK if "fail" not in res.lower() else T.BAD) for l in wrap(res, 30)]
+            scr.loading = lambda: ""
         threading.Thread(target=run, daemon=True).start()
 
     def refresh(self, now: bool = False) -> None:
@@ -1227,12 +1248,20 @@ class App:
                  [] if s.typing() else s.keys())
         if hasattr(s, "draw_extra"):
             s.draw_extra(self.panel.surf)
+        label = s.loading()
+        if label:
+            if getattr(s, "t0", None) is None:
+                s.t0 = time.monotonic()
+            T.draw_loading(self.panel.surf, label, s.t0, self.panel.fonts)
+        else:
+            s.t0 = None
         self.panel.flush()
 
     def run(self) -> None:
         next_draw = 0.0
         while not self.quit:
-            keys = self.kb.poll(0.25) if self.kb else []
+            spinning = bool(self.stack[-1].loading())
+            keys = self.kb.poll(0.1 if spinning else 0.25) if self.kb else []
             for k in keys:
                 if k.name == "esc_long":           # hold ESC: exit to HOME from any screen
                     self.quit = True
@@ -1247,7 +1276,8 @@ class App:
             self.refresh()
             if time.time() >= next_draw:
                 self.draw()
-                next_draw = time.time() + (1.0 if self.stack[-1].live else 3.0)
+                next_draw = time.time() + (0.12 if self.stack[-1].loading() else
+                                           1.0 if self.stack[-1].live else 3.0)
 
 
 def main_ui() -> int:

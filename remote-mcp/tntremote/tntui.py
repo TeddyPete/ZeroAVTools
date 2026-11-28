@@ -581,3 +581,294 @@ def draw_keybar(surf, keys: list, f: dict | None = None) -> None:
             img = pygame.transform.smoothscale(img, (SOFT_W - 4, img.get_height()))
         surf.blit(img, (cx - img.get_width() // 2, by + (SOFT_SIZE - img.get_height()) // 2))
         surf.fill(color if CYBER else SOFT_LINE, (cx, by + SOFT_SIZE + 1, 1, H - (by + SOFT_SIZE + 1)))
+
+
+# ---- helpers the popups below need (the other Nomad apps have them in nomadui) ----
+HELP = "help"
+
+
+def wrap_text(font, text, width: int, indent: str = "") -> list:
+    out = []
+    for para in (text if isinstance(text, list) else str(text).split("\n")):
+        words, cur = str(para).split(" "), ""
+        for w in words:
+            trial = f"{cur} {w}" if cur else w
+            if cur and font.size(trial)[0] > width:
+                out.append(cur)
+                cur = indent + w
+            else:
+                cur = trial
+        out.append(cur)
+    return out
+
+
+# ---- Setup-steps popup and Loading popup (every app) -----------------------------
+# Standard (Ted, 2026-11-28):
+#  * A mode that needs the user to do something the app can't do for them
+#    (plug a cable in, set a menu on the radio or TV, turn a feature on)
+#    shows a StepsPopup with those steps on the mode's first screen.
+#    OK / ESC close it, D closes it and hides it for good (saved in
+#    ~/.config/<app>/popups.json). Fn+H on that screen shows the steps again.
+#  * Anything slow inside an app shows the Loading popup, so the app never
+#    looks locked up: draw_loading() for apps that redraw by themselves, or
+#    `with loading(present, "Reading EDID"):` / run_loading() around a slow
+#    call on the main thread (a small thread keeps the spinner turning).
+
+POPUP_APP = ""                  # config folder name, set with set_popups()
+POPUP_BG = (4, 6, 10)           # dimmed background behind a popup
+POPUP_BOX = (22, 27, 40)
+POPUP_EDGE = (150, 200, 255)
+
+
+def set_popups(app_dir: str) -> None:
+    """The app's ~/.config folder name (store rule), e.g. "nomad-sdr"; the
+    "don't show again" choices are kept there."""
+    global POPUP_APP
+    POPUP_APP = app_dir
+
+
+def _popup_file() -> str:
+    import os
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, POPUP_APP or "nomad-app", "popups.json")
+
+
+def _hidden_popups() -> set:
+    import json
+    try:
+        with open(_popup_file()) as fh:
+            return set(json.load(fh).get("hidden", []))
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def steps_hidden(key: str) -> bool:
+    """True when the user pressed D on this popup before."""
+    return bool(key) and key in _hidden_popups()
+
+
+def hide_steps(key: str, hidden: bool = True) -> None:
+    import json
+    import os
+    keys = _hidden_popups()
+    (keys.add if hidden else keys.discard)(key)
+    path = _popup_file()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as fh:
+            json.dump({"hidden": sorted(keys)}, fh)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass                    # read-only home: the popup just shows again
+
+
+def reset_steps() -> None:
+    """Show every setup popup again (for a Settings item)."""
+    import os
+    try:
+        os.remove(_popup_file())
+    except OSError:
+        pass
+
+
+def _dim(surf) -> None:
+    import pygame
+    shade = pygame.Surface(surf.get_size())
+    shade.fill(POPUP_BG)
+    shade.set_alpha(170)
+    surf.blit(shade, (0, 0))
+
+
+def _box(surf, rect, edge=None) -> None:
+    import pygame
+    pygame.draw.rect(surf, POPUP_BOX, rect, border_radius=6)
+    pygame.draw.rect(surf, edge or POPUP_EDGE, rect, 2, border_radius=6)
+
+
+class StepsPopup:
+    """Steps the user has to do by hand before a mode works, shown over the
+    mode's first screen. steps: list of strings (numbered for you); intro and
+    outro: optional text before / after them. key: name for "don't show
+    again" ("" = always show, no D key)."""
+    LINE_H = 16
+
+    def __init__(self, title: str, steps: list, intro: str = "", outro: str = "", key: str = "",
+                 ok: str = "OK start"):
+        self.title, self.steps, self.intro, self.outro = title, list(steps), intro, outro
+        self.key, self.ok = key, ok
+        self.top = 0
+        self._lines = None
+
+    @classmethod
+    def maybe(cls, title: str, steps: list, key: str, **kw):
+        """A popup, or None when the user hid this one with D."""
+        return None if steps_hidden(key) else cls(title, steps, key=key, **kw)
+
+    def help_text(self) -> str:
+        """The same steps as plain text, for the screen's Fn+H help."""
+        out = [self.intro] if self.intro else []
+        out += [f"{i + 1}. {s}" for i, s in enumerate(self.steps)]
+        if self.outro:
+            out.append(self.outro)
+        return "\n".join(out)
+
+    def lines(self, f: dict) -> list:
+        if self._lines is None:
+            font, width = f["small"], W - 30
+            out = []
+            if self.intro:
+                out += [(l, FG) for l in wrap_text(font, self.intro, width)]
+            for i, s in enumerate(self.steps):
+                out += [(l, FG) for l in wrap_text(font, f"{i + 1}. {s}", width, indent="    ")]
+            if self.outro:
+                out += [(l, DIM) for l in wrap_text(font, self.outro, width)]
+            self._lines = out
+        return self._lines
+
+    def rows(self) -> int:
+        return (H - 8 - TITLE_H - HINT_H - 6) // self.LINE_H
+
+    def handle(self, key) -> str | None:
+        """"close" when the popup should go away (OK, ESC, Left; D also hides
+        it for good)."""
+        name, char, ctrl = _k(key)
+        if self.key and (char or "").lower() == "d" and not ctrl:
+            hide_steps(self.key)
+            return "close"
+        name = nav_name(name, char, ctrl)
+        n = len(self._lines or [])
+        if name in ("up", "pageup"):
+            self.top = max(0, self.top - (1 if name == "up" else self.rows()))
+        elif name in ("down", "pagedown"):
+            self.top = max(0, min(n - self.rows(), self.top + (1 if name == "down" else self.rows())))
+        elif name in ("enter", "esc", "left", "right", HELP, "backspace"):
+            return "close"
+        return None
+
+    def render(self, surf, f: dict | None = None) -> None:
+        """Draw over whatever is on surf now (the mode's first screen)."""
+        f = f or fonts()
+        _dim(surf)
+        x0, y0, w, h = 4, 4, W - 8, H - 8
+        _box(surf, (x0, y0, w, h), WARN)
+        surf.fill(TITLE_BG, (x0 + 2, y0 + 2, w - 4, TITLE_H - 4))
+        img = f["row"].render(self.title, True, TITLE_FG)
+        surf.blit(img, (x0 + 8, y0 + 2 + max(0, (TITLE_H - 4 - img.get_height()) // 2)), (0, 0, w - 16, TITLE_H))
+        ls = self.lines(f)
+        y = y0 + TITLE_H + 1
+        for text, color in ls[self.top:self.top + self.rows()]:
+            surf.blit(f["small"].render(text, True, color), (x0 + 9, y), (0, 0, w - 18, self.LINE_H))
+            y += self.LINE_H
+        if len(ls) > self.rows():
+            span = h - TITLE_H - HINT_H - 4
+            bh = max(8, span * self.rows() // len(ls))
+            by = y0 + TITLE_H + (span - bh) * self.top // max(1, len(ls) - self.rows())
+            surf.fill(POPUP_EDGE, (x0 + w - 6, by, 3, bh))
+        hy = y0 + h - HINT_H - 1
+        surf.fill(HINT_BG, (x0 + 2, hy, w - 4, HINT_H - 1))
+        parts = [self.ok] + (["↑↓ more"] if len(ls) > self.rows() else []) + \
+                (["D don't show again"] if self.key else [])
+        hint = "  ".join(parts)
+        himg = f["small"].render(hint, True, HINT_FG)
+        if himg.get_width() > w - 12 and f.get("tiny"):
+            himg = f["tiny"].render(hint, True, HINT_FG)
+        surf.blit(himg, (x0 + 6, hy + 1), (0, 0, w - 12, HINT_H))
+
+
+def draw_loading(surf, text: str = "Loading", t0: float | None = None, f: dict | None = None,
+                 detail: str = "", dim: bool = True) -> None:
+    """The Loading popup: a turning spinner, what is loading, and the seconds
+    once it takes a while. Call it every frame (about 8 a second) on top of
+    the screen it belongs to. t0: time.monotonic() when the job started."""
+    import math
+    import time
+    import pygame
+    f = f or fonts()
+    now = time.monotonic()
+    if dim:
+        _dim(surf)
+    w, h = 260, 70
+    x0, y0 = (W - w) // 2, (H - h) // 2
+    _box(surf, (x0, y0, w, h))
+    cx, cy, r = x0 + 30, y0 + h // 2, 13
+    step = int(now * 10) % 10
+    for i in range(10):
+        a = 2 * math.pi * i / 10 - math.pi / 2
+        age = (step - i) % 10
+        shade = max(50, 255 - age * 22)
+        col = (shade * POPUP_EDGE[0] // 255, shade * POPUP_EDGE[1] // 255, shade * POPUP_EDGE[2] // 255)
+        pygame.draw.circle(surf, col, (int(cx + r * math.cos(a)), int(cy + r * math.sin(a))), 3 if age else 4)
+    label = (text or "Loading").rstrip(". …") + "…"
+    tx, tw = x0 + 54, w - 62
+    img = f["row"].render(label, True, FG)
+    if img.get_width() > tw:
+        img = f["small"].render(label, True, FG)
+    sub = detail
+    if t0 is not None and now - t0 >= 2:
+        secs = f"{int(now - t0)} s"
+        sub = f"{detail}  {secs}" if detail else f"Please wait  {secs}"
+    elif not sub:
+        sub = "Please wait"
+    simg = f["small"].render(sub, True, DIM)
+    top = y0 + (h - img.get_height() - simg.get_height() - 2) // 2
+    surf.blit(img, (tx, top), (0, 0, tw, img.get_height()))
+    surf.blit(simg, (tx, top + img.get_height() + 2), (0, 0, tw, simg.get_height()))
+
+
+class loading:
+    """Keep the Loading popup turning while the main thread does something
+    slow:
+
+        with nomadui.loading(present, "Reading EDID"):
+            info = edid.read()
+
+    present(draw) must put a frame on the LCD: it is called with a function
+    draw(surf) that paints the popup on a 320x170 surface. It runs in a
+    helper thread, so present must be safe to call from one (an app whose
+    LCD has a worker thread, or one that just writes the framebuffer)."""
+
+    def __init__(self, present, text: str = "Loading", detail: str = "", delay: float = 0.0,
+                 background=None):
+        self.present, self.text, self.detail, self.delay = present, text, detail, delay
+        self.background = background     # optional fn(surf) drawing the screen under it
+        self._stop = None
+        self._th = None
+
+    def _draw(self, surf) -> None:
+        if self.background is not None:
+            self.background(surf)
+            draw_loading(surf, self.text, self.t0, detail=self.detail)
+        else:
+            surf.fill(BG)
+            draw_loading(surf, self.text, self.t0, detail=self.detail, dim=False)
+
+    def __enter__(self):
+        import threading
+        import time
+        self.t0 = time.monotonic()
+        self._stop = threading.Event()
+
+        def spin():
+            if self.delay and self._stop.wait(self.delay):
+                return
+            while not self._stop.is_set():
+                try:
+                    self.present(self._draw)
+                except Exception:
+                    return          # never let the popup break the app
+                self._stop.wait(0.12)
+        self._th = threading.Thread(target=spin, daemon=True)
+        self._th.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._th is not None:
+            self._th.join(1.0)
+        return False
+
+
+def run_loading(present, text: str, fn, *args, **kw):
+    """fn(*args, **kw) with the Loading popup showing; returns its result."""
+    with loading(present, text):
+        return fn(*args, **kw)
