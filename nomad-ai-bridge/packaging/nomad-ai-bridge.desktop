@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Nomad AI Bridge
+Exec=bin/nomad-ai-bridge
+Terminal=false
+Icon=share/images/nomad-ai-bridge.png
+Type=Application

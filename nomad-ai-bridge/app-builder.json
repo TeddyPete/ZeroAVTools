@@ -1,0 +1,41 @@
+{
+  "package_name": "nomad-ai-bridge",
+  "version": "0.2.11",
+  "app_name": "Nomad AI Bridge",
+  "bin_name": "nomad-ai-bridge",
+  "description": "Let your AI connect to and control your Cardputer Zero. MCP server for Claude, ChatGPT & Codex.",
+  "store": {
+    "summary": "Let your AI connect to and control your Cardputer Zero",
+    "description": "Developed by TheTechNomad (www.TheTechNomad.com, https://github.com/TeddyPete). Nomad AI Bridge lets your AI connect to and control your Cardputer Zero. It is an MCP server for Claude, ChatGPT & Codex: AI apps (Claude, ChatGPT plugins, OpenAI Codex and other MCP clients) can use the device from wherever it has internet: run commands and long background jobs, read, write and edit files, install and run programs, take screenshots of the built-in screen, and run Nomad Net Tools checks when that app is installed. It connects out through a free ngrok tunnel, so no ports are opened on the network. A setup wizard with QR codes walks you through making the free ngrok account and pasting the token from your phone, shows the connector address as a QR code, and connects your AI app: Claude and ChatGPT sign in with a one-time code shown on this screen, while Codex, Claude Code and other MCP apps get a revocable access key handed to your computer, so they work the first time in every chat and cloud agent. See which AI apps are connected, disconnect one or all, set permissions and watch live activity from the keyboard. Nothing runs as root: Admin (sudo) is optional, off by default, and set up once by typing the device password (never saved). A no-account quick test tunnel and Cloudflare are also available. Powered by ngrok. Not affiliated with ngrok, Anthropic or OpenAI; Claude, ChatGPT and Codex are trademarks of their owners.",
+    "categories": [
+      "Development",
+      "AI"
+    ],
+    "screenshots": [
+      "screenshots/lcd_0.png",
+      "screenshots/lcd_1.png",
+      "screenshots/lcd_2.png",
+      "screenshots/lcd_3.png",
+      "screenshots/lcd_4.png",
+      "screenshots/lcd_5.png"
+    ],
+    "icon": "packaging/icon.png",
+    "license": "GPL-3.0-only",
+    "source_repo": "https://github.com/TeddyPete/NomadTools",
+    "author": {
+      "github": "TeddyPete",
+      "display_name": "Tech Nomad Ted"
+    },
+    "share_code": "NMAB",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": true,
+      "additional_hardware": false,
+      "background_service": true,
+      "external_display": false
+    },
+    "locales": {}
+  }
+}

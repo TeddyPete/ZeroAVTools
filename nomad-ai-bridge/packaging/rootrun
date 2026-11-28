@@ -1,0 +1,10 @@
+#!/bin/sh
+# Nomad AI Bridge: run one command as root for the connected AI app.
+# The nomad-ai-bridge server only calls this (through "sudo -n") while
+# Nomad AI Bridge > Permissions > Admin (sudo) is switched on at the device.
+# The owner allows it once (nomad-ai-bridge --enable-admin or the app); see adminsetup.py.
+[ -n "$1" ] || { echo "usage: rootrun 'command'" >&2; exit 2; }
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export DEBIAN_FRONTEND=noninteractive
+logger -t nomad-ai-bridge "root command: $1" 2>/dev/null || true
+exec /bin/bash -c "$1"

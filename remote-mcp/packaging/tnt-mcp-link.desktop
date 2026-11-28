@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=TNT MCP Link
+Exec=bin/tnt-mcp-link
+Terminal=false
+Icon=share/images/tnt-mcp-link.png
+Type=Application

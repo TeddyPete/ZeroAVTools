@@ -1,0 +1,17 @@
+# TNT MCP Link server (user service of the pi user; starts at boot through
+# lingering when switched On in the TNT MCP Link app). The unit keeps the
+# old tnt-remote name so upgrades keep the On/Off state.
+[Unit]
+Description=TNT MCP Link (MCP server for the CardputerZero)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tnt-mcp-link --serve
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+#!/bin/sh
+# On purge: remove the optional Admin (sudo) rule the owner may have added
+# (nomad-ai-bridge --enable-admin). The package itself never installs it.
+set -e
+if [ "$1" = purge ]; then
+  rm -f /etc/sudoers.d/nomad-ai-bridge /etc/sudoers.d/.nomad-ai-bridge.new
+fi
+exit 0
