@@ -44,6 +44,13 @@ class PacketTools:
         return Engine(self.store.folder, Path.home() / "Documents" / "Rig-Companion-Transfers", output)
 
     def refresh_mail(self):
+        self.app.flash_loading("Opening the mailbox", "Winlink messages")
+        try:
+            self._refresh_mail()
+        finally:
+            self.app.loaded()
+
+    def _refresh_mail(self):
         rows = []
         with self.native(lambda kind, data: rows.append(tuple(data.decode("utf-8", "replace").split("\0", 6))) if kind == 3 else None) as engine:
             engine.require("list_mail", "", error="Could not read the mailbox")

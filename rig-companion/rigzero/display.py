@@ -87,8 +87,15 @@ class Display:
             line = ""
             for char in paragraph:
                 if self.fonts[14].size(line + char)[0] > width:
-                    lines.append(line)
-                    line = ""
+                    cut = line.rfind(" ")
+                    if cut > 0 and char != " ":
+                        lines.append(line[:cut])
+                        line = line[cut + 1:]
+                    else:
+                        lines.append(line)
+                        line = ""
+                    if char == " " and not line:
+                        continue
                 line += char
             lines.append(line)
         for row, line in enumerate(lines[offset:offset + height // 17]):

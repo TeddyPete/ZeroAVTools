@@ -56,6 +56,8 @@ class App:
         self.last_render = 0
         self.last_key = ""
         self.map_active = False
+        self.popup = None           # setup steps the user must do on the radio
+        self.busy = None            # Loading box: {"text", "detail", "started", "done", "timeout"}
         self.map_view = None
         self.raw_detail = False
         self.panels = Panels(self)
@@ -66,6 +68,98 @@ class App:
         self.notice = str(message)
         self.notice_until = time.monotonic() + 5
         self.dirty = True
+
+    # ------------------------------------------------------------------ popups
+    def show_steps(self, key, title, steps, force=False, note=""):
+        """Show steps the user has to do by hand (no CAT command exists for them).
+
+        Shown until the user presses 8 (don't show again) unless force is set.
+        """
+        if not force and self.store.get("steps_ok_" + key, False):
+            return
+        if self.popup and self.popup["key"] == key:
+            return
+        self.popup = {"key": key, "title": title, "steps": list(steps), "note": note, "offset": 0}
+        self.dirty = True
+
+    def steps_done(self, key):
+        """The app saw the steps work (e.g. the radio answered): stop showing them."""
+        self.store.set("steps_ok_" + key, True)
+        if self.popup and self.popup["key"] == key:
+            self.popup = None
+            self.dirty = True
+
+    def loading(self, text, detail="", done=None, timeout=30):
+        """Loading box until done() returns True, timeout passes or loaded() is called."""
+        self.busy = {"text": text, "detail": detail, "started": time.monotonic(), "done": done, "timeout": timeout}
+        self.dirty = True
+
+    def loaded(self):
+        self.busy = None
+        self.dirty = True
+
+    def aprs_steps(self, force=False):
+        self.show_steps("aprs", "APRS on the TH-D75", (
+            "Turn APRS on: press the TNC key until APRS shows",
+            "Menu 590 PC Output: Raw Packets",
+            "Menu 982 PC Output (APRS): Bluetooth",
+            "Packets appear here as they are heard. K starts KISS instead."), force=force,
+            note="These are radio menus with no Bluetooth command, so set them on the radio once.")
+
+    def flash_loading(self, text, detail=""):
+        """Show the Loading box right now, before a slow call that blocks the screen."""
+        self.loading(text, detail, timeout=120)
+        try:
+            self.draw()
+            self.display.flush()
+        except Exception:
+            pass
+
+    def press_popup(self, name, char):
+        popup = self.popup
+        key = (char or "").lower()
+        if name in ("enter", "esc", "right", "left") or key == "4":
+            self.popup = None
+        elif key == "8":
+            self.store.set("steps_ok_" + popup["key"], True)
+            self.popup = None
+        elif name in ("up", "down") or key in ("f", "x"):
+            popup["offset"] = max(0, min(popup.get("max", 0), popup["offset"] + (-1 if name == "up" or key == "f" else 1)))
+
+    def draw_overlays(self):
+        d = self.display
+        busy = self.busy
+        if busy:
+            age = time.monotonic() - busy["started"]
+            finished = False
+            try:
+                finished = bool(busy["done"] and busy["done"]())
+            except Exception:
+                finished = True
+            if finished or age > busy["timeout"]:
+                self.busy = busy = None
+        if self.popup:
+            p = self.popup
+            d.rect(4, 20, 312, 130, LINE, 6)
+            d.rect(6, 22, 308, 126, BG, 5)
+            d.text(p["title"], 14, 25, ACCENT, 17, 292)
+            lines = [f"{i}. {step}" for i, step in enumerate(p["steps"], 1)]
+            if p.get("note"):
+                lines.append(p["note"])
+            total = d.wrap("\n".join(lines), x=14, y=46, width=292, height=85, offset=p["offset"])
+            p["max"] = max(0, total - 5)
+            hint = "Enter OK · 8 don't show again"
+            if p["max"]:
+                hint += " · X more" if p["offset"] < p["max"] else " · F back up"
+            d.text(hint, 14, 132, DIM, 12, 292)
+        elif busy:
+            age = time.monotonic() - busy["started"]
+            d.rect(38, 46, 244, 72, LINE, 6)
+            d.rect(40, 48, 240, 68, PANEL, 5)
+            dots = "." * (1 + int(age * 2) % 3)
+            d.text(busy["text"] + dots, 52, 56, INK, 14, 224)
+            detail = busy["detail"] or ("Please wait" if age < 3 else f"Still working · {int(age)} s")
+            d.text(detail, 52, 84, DIM, 12, 220)
 
     def rows(self):
         return self.store.rows("saved" if self.saved and self.page == 1 else
@@ -121,6 +215,12 @@ class App:
         if not self.link:
             self.tell("Bluetooth is unavailable in this preview")
             return
+        self.show_steps("pair", "Pair the TH-D75", (
+            "On the radio: Menu 930 Bluetooth: On",
+            "Menu 934 Pairing Mode (the radio waits for this scan)",
+            "Pick the TH-D75 in the list here",
+            "Check both screens show the same number, then accept"),
+            note="Only needed once. Esc or Enter closes this; the scan keeps running.")
         self.scan_active = True
         self.scan_until = time.monotonic() + 8
         self.devices = []
@@ -141,11 +241,18 @@ class App:
             self.radio.submit("end_kiss")
         elif state["connected"]:
             if state.get("model"):
-                self.radio.submit("start_kiss")
+                self.start_kiss()
             else:
                 self.panels.open("monitor", state)
         else:
             self.tell("Connect the TH-D75 first")
+
+    def start_kiss(self):
+        radio = self.radio
+        radio.update(error="")
+        radio.submit("start_kiss")
+        self.loading("Starting KISS", "Setting up the radio's TNC",
+                     done=lambda: radio.snapshot()["kiss"] or bool(radio.snapshot()["error"]), timeout=20)
 
     def open_map(self, packet=None):
         if self.map_view is None:
@@ -186,6 +293,9 @@ class App:
 
     def handle(self, name, char=""):
         self.dirty = True
+        if self.popup:
+            self.press_popup(name, char)
+            return
         state = self.radio.snapshot()
         if self.pair_code:
             if char.lower() == "y" or name == "enter":
@@ -245,6 +355,8 @@ class App:
             self.page = int(char) - 4
             self.selected = 0
             self.saved = False
+            if self.page == 1 and not self.rows():
+                self.aprs_steps()
             return
         navigation = {"f": "up", "x": "down", "z": "left", "c": "right"}
         name = navigation.get(char.lower(), name)
@@ -317,7 +429,11 @@ class App:
 
     def link_action(self, action, state):
         if isinstance(action, int):
+            self.radio.update(error="")
             self.radio.submit("connect", self.devices[action])
+            radio = self.radio
+            self.loading("Connecting to the radio", self.devices[action].get("name", "Bluetooth"),
+                         done=lambda: radio.snapshot()["connected"] or bool(radio.snapshot()["error"]), timeout=30)
         elif action == "scan":
             self.start_scan()
         elif action == "callsign":
@@ -391,7 +507,7 @@ class App:
                 elif not valid_call(self.compose["to"]) or not self.compose["text"]:
                     self.tell("Enter a recipient and message")
                 elif not state["kiss"]:
-                    self.radio.submit("start_kiss")
+                    self.start_kiss()
                     self.tell("Starting KISS. Press Enter again when ready.")
                 elif state["owner"] != "local":
                     self.tell("Phone or TCP session owns the radio")
@@ -441,6 +557,10 @@ class App:
             self.setting_time = False
 
     def draw(self):
+        self.draw_screen()
+        self.draw_overlays()
+
+    def draw_screen(self):
         state = self.radio.snapshot()
         d = self.display
         status = "KISS" if state["kiss"] else "CAT" if state["fresh"] else "Offline"
@@ -693,10 +813,14 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit("Rig Companion is already running")
+    display = Display()
+    display.surface.fill(BG)
+    display.text("Rig Companion", 10, 60, INK, 23)
+    display.text("Starting…", 10, 96, DIM, 14)
+    display.flush()
     store = Store(folder)
     link = BluetoothLink()
     radio = Radio(store, link)
-    display = Display()
     keyboard = Keyboard()
     app = App(store, radio, display, link)
     signal.signal(signal.SIGTERM, lambda *_: setattr(app, "running", False))

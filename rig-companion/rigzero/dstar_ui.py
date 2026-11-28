@@ -30,6 +30,13 @@ GUIDE = ("TH-D75 setup\n"
          "\nThe TH-D75 transmits nothing on RF in this mode. It has no Access Point mode.")
 
 
+RADIO_STEPS = ("Menu 650: Reflector TERM Mode",
+               "Menu 651: your callsign",
+               "Menu 985: Bluetooth",
+               "Press 8 Start here. Band A goes to DV for you.")
+RADIO_NOTE = "No Bluetooth command sets these menus. Set them once; the radio keeps them."
+
+
 def ago(iso: str) -> str:
     try:
         then = datetime.fromisoformat(iso)
@@ -71,13 +78,21 @@ class DStarTools:
 
     def open(self, screen="home"):
         self.gw()
+        first = not self.screen
         self.screen, self.selected, self.offset = screen, 0, 0
         self.edit = None
+        if screen == "home" and first:
+            self.radio_steps()
         if screen == "reflectors" and self.gateway.hosts.stale() and not self.hosts_loading:
             self.update_hosts()
 
+    def radio_steps(self, force=False):
+        self.app.show_steps("dstar", "Set up the TH-D75 first", RADIO_STEPS, force=force, note=RADIO_NOTE)
+
     def update_hosts(self, force=False):
         self.hosts_loading = True
+        self.app.loading("Downloading reflector lists", "REF, XRF, XLX and DCS", done=lambda: not self.hosts_loading,
+                         timeout=60)
 
         def work():
             try:
@@ -167,7 +182,7 @@ class DStarTools:
                     last = (self.store.get("dstar_recent", []) or [""])[0]
                     if len(last) == 7:
                         self.start_if_needed(snap)
-                        gw.submit("link", last[:6], last[6])
+                        self.link(last[:6], last[6])
                     else:
                         self.open("reflectors")
             elif key == "8":
@@ -260,7 +275,7 @@ class DStarTools:
         elif key == "8" or name == "enter":
             snap = self.gw().snapshot()
             self.start_if_needed(snap)
-            self.gw().submit("link", self.pick[0], self.pick[1])
+            self.link(self.pick[0], self.pick[1])
             self.open("home")
 
     # ------------------------------------------------------------------ callsign routing
@@ -289,6 +304,8 @@ class DStarTools:
             self.app.tell("Turn on callsign routing in setup")
             return
         irc.find(call)
+        self.app.loading(f"Looking up {call}", "on QuadNet",
+                         done=lambda: irc.ready and irc.result(call)[0] != "wait", timeout=20)
 
     def route(self, call):
         try:
@@ -316,6 +333,19 @@ class DStarTools:
             self.app.tell(f"Added {name} {module} to favorites")
         self.store.set("dstar_favorites", favorites)
 
+    def link(self, name, module):
+        gw = self.gw()
+        gw.update(link="Linking", error="")
+        gw.submit("link", name, module)
+        if self.app.busy:                       # still connecting to the radio: say both
+            self.app.busy["detail"] = f"then linking {name} {module}"
+            return
+
+        def linked():
+            snap = gw.snapshot()
+            return snap["link"] != "Linking" or bool(snap["error"])
+        self.app.loading(f"Linking {name} {module}", "Reflector", done=linked, timeout=15)
+
     def start_if_needed(self, snap):
         if not snap["running"]:
             self.start(self.app.radio.snapshot())
@@ -327,7 +357,14 @@ class DStarTools:
         if not self.store.get("callsign"):
             self.app.tell("Set your callsign under Link first")
             return
-        self.gw().submit("start")
+        gw = self.gw()
+        gw.update(radio="Opening radio link", error="")
+        gw.submit("start")
+
+        def ready():
+            snap = gw.snapshot()
+            return snap["radio"] == "Radio ready" or bool(snap["error"]) or snap["radio"].startswith("Radio not")
+        self.app.loading("Connecting to the TH-D75", "Bluetooth gateway link", done=ready, timeout=35)
 
     def setup_action(self, action, state):
         gw = self.gw()
@@ -378,6 +415,14 @@ class DStarTools:
     def draw(self, d, state):
         gw = self.gw()
         snap = gw.snapshot()
+        if snap["radio"] == "Radio ready":
+            if not self.store.get("steps_ok_dstar", False):
+                self.app.steps_done("dstar")
+        elif snap["radio"].startswith("Radio not") or "gateway mode" in snap["error"] or "not answering" in snap["error"]:
+            if not getattr(self, "steps_shown_for", "") == snap["error"] + snap["radio"]:
+                self.steps_shown_for = snap["error"] + snap["radio"]
+                self.app.loaded()
+                self.radio_steps(force=True)
         notice = snap["error"] or snap["notice"]
         if notice and notice != self.seen_notice:
             self.seen_notice = notice

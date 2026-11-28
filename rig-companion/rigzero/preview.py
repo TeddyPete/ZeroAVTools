@@ -139,6 +139,15 @@ def render_dstar(app, screen, store, radio, folder, temp):
     tools.screen, tools.entry, tools.offset = "entry", dict(heard[0], name="Example Operator", place="Minneapolis, MN"), 0
     app.draw()
     screen.save(folder / "dstar-detail.png")
+    tools.screen = "home"
+    tools.radio_steps(force=True)
+    app.draw()
+    screen.save(folder / "dstar-steps.png")
+    app.popup = None
+    app.loading("Connecting to the TH-D75", "Bluetooth gateway link", timeout=60)
+    app.draw()
+    screen.save(folder / "loading.png")
+    app.loaded()
     irc.pending["N0DEMO"] = 0.0
     tools.screen, tools.call_edit, tools.call_target = "call", None, "N0DEMO"
     app.draw()
