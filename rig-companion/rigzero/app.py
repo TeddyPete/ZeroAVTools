@@ -23,10 +23,22 @@ from .dstar_ui import DStarTools
 from .display import ACCENT, ALERT, BG, DIM, INK, LINE, PANEL, SELECT, SELECT_DIM, Display, Keyboard
 from .gps_clock import LIVE_SECONDS
 from .protocol import MODES, POWERS, valid_call
+from .models import DEFAULT_RADIO, RADIOS, has_feature, radio_info
 from .radio import Radio
 from .storage import Store
 
 PAGES = ("Radio", "APRS", "Inbox", "Weather", "Link")
+
+
+def make_radio(store, link, key=None):
+    """Start the worker for the chosen radio. Every driver has the same interface."""
+    info = radio_info(key or store.get("radio_model", None) or DEFAULT_RADIO)
+    if link:
+        link.family = info["family"]
+    if info["family"] == "benshi":
+        from .benshi import BenshiRadio
+        return BenshiRadio(store, link, info["key"])
+    return Radio(store, link)
 
 
 class App:
@@ -63,6 +75,100 @@ class App:
         self.panels = Panels(self)
         self.packet = PacketTools(self)
         self.dstar = DStarTools(self)
+        self.picker = None          # radio picker: index of the highlighted radio
+
+    def first_start(self):
+        """Ask which radio on the very first start; existing TH-D75 users keep theirs."""
+        if self.store.get("radio_model", None) is None:
+            if self.store.get("device", None):
+                self.store.set("radio_model", DEFAULT_RADIO)
+            else:
+                self.open_picker()
+
+    # ------------------------------------------------------------------ radio choice
+    @property
+    def radio_key(self):
+        return self.store.get("radio_model", None) or DEFAULT_RADIO
+
+    @property
+    def family(self):
+        return radio_info(self.radio_key)["family"]
+
+    def feature(self, name):
+        return has_feature(self.radio_key, name)
+
+    def open_picker(self):
+        keys = [radio["key"] for radio in RADIOS]
+        self.picker = keys.index(self.radio_key) if self.radio_key in keys else 0
+        self.dirty = True
+
+    def press_picker(self, name, char):
+        key = (char or "").lower()
+        name = {"f": "up", "x": "down", "z": "left", "c": "right"}.get(key, name)
+        if name in ("up", "down"):
+            self.picker = (self.picker + (1 if name == "down" else -1)) % len(RADIOS)
+        elif name in ("enter", "right"):
+            chosen = RADIOS[self.picker]["key"]
+            self.picker = None
+            self.choose_radio(chosen)
+        elif name in ("esc", "left"):
+            if self.store.get("radio_model", None) is None:
+                self.store.set("radio_model", DEFAULT_RADIO)
+            self.picker = None
+
+    def choose_radio(self, key):
+        """Switch drivers. Same screens and keys; the new radio loads its own controls."""
+        first = self.store.get("radio_model", None) is None
+        if key == self.radio_key and not first:
+            return
+        state = self.radio.snapshot()
+        if state["kiss"] or getattr(self.radio, "native", None) or getattr(self.radio, "suspended", ""):
+            self.tell("End the packet or D-STAR session first")
+            return
+        if self.store.get("recovery", None):
+            self.tell("Restore the previous KISS session first")
+            return
+        previous = self.radio_key
+        self.store.set("radio_model", key)
+        if key == previous and not first:
+            return
+        if not first:
+            self.store.set("device", None)      # the paired device belongs to the old radio
+        old = self.radio
+        self.flash_loading("Loading " + key + " controls")
+        try:
+            old.close()
+        except RuntimeError as error:
+            self.store.set("radio_model", previous)
+            self.loaded()
+            self.tell(error)
+            return
+        self.radio = make_radio(self.store, self.link, key)
+        if self.ble:
+            self.ble.radio = self.radio
+        if self.tcp:
+            self.tcp.radio = self.radio
+        self.devices = []
+        self.page = 4
+        self.link_selected = 1
+        self.loaded()
+        self.tell(radio_info(key)["name"] + " chosen. Find it to pair.")
+
+    def draw_picker(self):
+        d = self.display
+        d.header("Choose your radio", f"{self.picker + 1}/{len(RADIOS)}")
+        start = max(0, min(self.picker - 1, len(RADIOS) - 4))
+        for row, radio in enumerate(RADIOS[start:start + 4]):
+            index = start + row
+            y = 30 + row * 28
+            chosen = index == self.picker
+            if chosen:
+                d.rect(7, y, 306, 26, SELECT, 3)
+            d.text(radio["name"], 14, y + 4, INK, 14, 220)
+            mark = "In use" if radio["key"] == self.radio_key and self.store.get("radio_model", None) else \
+                ("D-STAR" if "dstar" in radio["features"] else radio["family"].title())
+            d.text(mark, 240, y + 6, INK if chosen else DIM, 12, 70)
+        d.text("Enter choose  ·  Esc back  ·  F/X move", 10, 148, DIM, 12, 302)
 
     def tell(self, message):
         self.notice = str(message)
@@ -99,6 +205,8 @@ class App:
         self.dirty = True
 
     def aprs_steps(self, force=False):
+        if self.family != "kenwood":
+            return              # Benshi radios send every packet heard; nothing to set
         self.show_steps("aprs", "APRS on the TH-D75", (
             "Turn APRS on: press the TNC key until APRS shows",
             "Menu 590 PC Output: Raw Packets",
@@ -215,12 +323,20 @@ class App:
         if not self.link:
             self.tell("Bluetooth is unavailable in this preview")
             return
-        self.show_steps("pair", "Pair the TH-D75", (
-            "On the radio: Menu 930 Bluetooth: On",
-            "Menu 934 Pairing Mode (the radio waits for this scan)",
-            "Pick the TH-D75 in the list here",
-            "Check both screens show the same number, then accept"),
-            note="Only needed once. Esc or Enter closes this; the scan keeps running.")
+        if self.family == "kenwood":
+            self.show_steps("pair", "Pair the " + self.radio_key, (
+                "On the radio: Menu 930 Bluetooth: On",
+                "Menu 934 Pairing Mode (the radio waits for this scan)",
+                "Pick the " + self.radio_key + " in the list here",
+                "Check both screens show the same number, then accept"),
+                note="Only needed once. Esc or Enter closes this; the scan keeps running.")
+        else:
+            self.show_steps("pair_" + self.family, "Pair the " + self.radio_key, (
+                "Turn the radio on with Bluetooth enabled",
+                "Close the HT app on your phone so the radio is free",
+                "Pick the " + self.radio_key + " in the list here",
+                "Accept pairing on the radio if it asks"),
+                note="Only needed once. Esc or Enter closes this; the scan keeps running.")
         self.scan_active = True
         self.scan_until = time.monotonic() + 8
         self.devices = []
@@ -245,7 +361,7 @@ class App:
             else:
                 self.panels.open("monitor", state)
         else:
-            self.tell("Connect the TH-D75 first")
+            self.tell("Connect the " + self.radio_key + " first")
 
     def start_kiss(self):
         radio = self.radio
@@ -295,6 +411,9 @@ class App:
         self.dirty = True
         if self.popup:
             self.press_popup(name, char)
+            return
+        if self.picker is not None:
+            self.press_picker(name, char)
             return
         state = self.radio.snapshot()
         if self.pair_code:
@@ -413,18 +532,26 @@ class App:
                 self.link_action(action, state)
 
     def link_options(self):
-        options = [("Find Kenwood radio / pair", "scan"), ("GPS time from TH-D75", "gps_time"), ("Field Manual", "guide"),
-                   ("Radio Controls", "controls"), ("Packet Tools", "packet_hub"),
-                   ("D-STAR reflectors", "dstar"),
+        options = [("Radio  " + radio_info(self.radio_key)["name"], "pick_radio"),
+                   ("Find " + self.radio_key + " / pair", "scan")]
+        if self.feature("gps"):
+            options.append(("GPS time from " + self.radio_key, "gps_time"))
+        options.append(("Field Manual", "guide"))
+        if self.feature("controls"):
+            options.append(("Radio Controls", "controls"))
+        options.append(("Packet Tools", "packet_hub"))
+        if self.feature("dstar"):
+            options.append(("D-STAR reflectors", "dstar"))
+        options += [
                    ("APRS and packet setup", "packet"), ("Callsign  " + (self.store.get("callsign") or "Set yours"), "callsign"),
                    ("APRS path  " + (self.store.get("path") or "Direct"), "path"),
-                   ("KISS  start / end / restore", "kiss"),
+                   ("KISS  start / end / restore" if self.family == "kenwood" else "Radio TNC  start / end", "kiss"),
                    ("BLE phone bridge  " + ("On" if self.ble and self.ble.enabled else "Off"), "ble"),
                    ("TCP KISS / 8001  " + ("On" if self.tcp else "Off"), "tcp"),
                    ("Map data licences", "map_credits"),
                    ("About Rig Companion", "about")]
         for index, device in enumerate(self.devices):
-            options.insert(index + 1, (device["name"] + (" · paired" if device["paired"] else " · pair"), index))
+            options.insert(index + 2, (device["name"] + (" · paired" if device["paired"] else " · pair"), index))
         return options
 
     def link_action(self, action, state):
@@ -436,6 +563,8 @@ class App:
                          done=lambda: radio.snapshot()["connected"] or bool(radio.snapshot()["error"]), timeout=30)
         elif action == "scan":
             self.start_scan()
+        elif action == "pick_radio":
+            self.open_picker()
         elif action == "callsign":
             self.editor, self.edit_value = "callsign", self.store.get("callsign")
         elif action == "path":
@@ -557,7 +686,10 @@ class App:
             self.setting_time = False
 
     def draw(self):
-        self.draw_screen()
+        if self.picker is not None:
+            self.draw_picker()
+        else:
+            self.draw_screen()
         self.draw_overlays()
 
     def draw_screen(self):
@@ -569,7 +701,8 @@ class App:
         if self.pair_code:
             d.header("Confirm pairing")
             d.text(self.pair_code, 106, 40, ACCENT, 23)
-            target = getattr(self.link, "pair_target", "TH-D75")
+            target = getattr(self.link, "pair_target", "radio")
+            target = self.radio_key if target == "radio" else target
             d.wrap(f"Compare this number with the {target}.\nEnter / Y accepts. Esc / N declines.", y=81, height=60)
             return
         if self.editor:
@@ -647,14 +780,21 @@ class App:
                    INK if state["connected"] else DIM, 23)
             mode = MODES[band["mode"]] if 0 <= band["mode"] < len(MODES) else "--"
             channel = {0: "VFO", 1: "MR", 2: "CALL"}.get(band["channel"], "--")
+            if band.get("number", -1) >= 0:     # channel-based radios show channel and name
+                channel = f"CH{band['number'] + 1}"
+
             d.text(mode + " " + channel, 224, y + 2, SELECT_DIM if selected else DIM, 12, 83)
-            d.text(f"SM {band['meter']}" if band["meter"] >= 0 else "SM --", 224, y + 18, INK if selected else ACCENT, 12)
+            meter = f"SM {band['meter']}" if band["meter"] >= 0 else "SM --"
+            if band.get("name"):
+                meter = band["name"][:7] + " " + meter[3:]
+            d.text(meter, 224, y + 18, INK if selected else ACCENT, 12, 83)
         band = state["bands"][state["active"]]
         power = POWERS[band["power"]] if 0 <= band["power"] < len(POWERS) else "--"
         d.text(f"Vol {state['volume'] if state['volume'] >= 0 else '--'}   SQL {band['squelch'] if band['squelch'] >= 0 else '--'}   {power}", 10, 111, DIM, 12, 300)
-        text = state["error"] or ("Enter tune   Q controls   G manual" if state["connected"] else
+        hint = "Enter tune   Q controls   G manual" if self.feature("tune") else "↑↓ channel   Q controls   G manual"
+        text = state["error"] or (hint if state["connected"] else
                                   "Last readback · 8 Link to reconnect" if any(b["hz"] for b in state["bands"]) else
-                                  "8 Link · Find TH-D75 to pair")
+                                  "8 Link · Find " + self.radio_key + " to pair")
         if getattr(self.radio, "suspended", "") and not state["error"]:
             text = "D-STAR gateway is using the radio · R opens it"
         d.text(text, 10, 130, ALERT if state["error"] else DIM, 12, 302)
@@ -820,9 +960,10 @@ def main():
     display.flush()
     store = Store(folder)
     link = BluetoothLink()
-    radio = Radio(store, link)
+    radio = make_radio(store, link)
     keyboard = Keyboard()
     app = App(store, radio, display, link)
+    app.first_start()
     signal.signal(signal.SIGTERM, lambda *_: setattr(app, "running", False))
     signal.signal(signal.SIGINT, lambda *_: setattr(app, "running", False))
     started = time.monotonic()
@@ -852,7 +993,7 @@ def main():
                 app.running = False
     finally:
         app.close()
-        radio.close()
+        app.radio.close()
         link.close()
         keyboard.close()
         display.close()

@@ -1,5 +1,25 @@
 # Rig Companion for CardputerZero
 
+## 0.6.0 Choose your radio
+
+Rig Companion now drives more than one radio. Pick yours on first start, or
+later under **Link > Radio**. Each radio loads its own controls, but the screens,
+layout and keys stay the same.
+
+| Radio | Driver | What works |
+|---|---|---|
+| Kenwood TH-D75 | Kenwood CAT + KISS over Bluetooth SPP | Everything, including D-STAR and GPS time |
+| Kenwood TH-D74, TM-D750 | Kenwood | APRS, KISS, packet tools |
+| BTECH UV-Pro / UV-50Pro, Radioddity GA-5WB / DB50-B, Vero VR-N76 / N75 / N7500 / N7600, Radtel RT-660 | Benshi over Bluetooth (GAIA service) | Channel up/down with names, volume, squelch, dual watch, APRS receive and send, packet tools through the radio's built-in TNC |
+
+Benshi radios work from memory channels, so Up/Down steps through the
+programmed channels instead of typing a frequency. D-STAR and GPS time only
+show for the TH-D75. Close the HT phone app before pairing a Benshi radio, since
+the radio takes one control connection at a time.
+
+The Benshi protocol notes come from benlink and HTCommander (both Apache-2.0).
+No source is copied. Hardware testing with a real Benshi radio is still to do.
+
 ## 0.5.1 D-STAR callsign routing
 
 Direct calls to one callsign, the way a Pi-Star hotspot does it. When the

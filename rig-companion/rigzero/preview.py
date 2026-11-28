@@ -73,9 +73,38 @@ def render_previews(folder: Path):
         app.page = 0
         app.draw()
         screen.save(folder / "disconnected.png")
-        app.close()
+        app.open_picker()
+        app.picker = 3
+        app.draw()
+        screen.save(folder / "radio-picker.png")
+        app.picker = None
         radio.close()
+        render_benshi(app, screen, store, folder)
+        app.close()
+        app.radio.close()
         store.close()
+
+
+def render_benshi(app, screen, store, folder):
+    """A UV-Pro on the same Radio and Link screens (no Bluetooth; state only)."""
+    import time
+    from .benshi import BenshiRadio
+    store.set("radio_model", "UV-Pro")
+    radio = BenshiRadio(store, None, "UV-Pro")
+    radio.update(identity=True, connected=True, model="UV-Pro", volume=6, dual=1)
+    radio.identified_at = time.monotonic()
+    radio.state["bands"] = [{"hz": 144390000, "mode": 0, "power": 0, "channel": 1, "squelch": 3,
+                             "meter": 4, "busy": 1, "number": 0, "name": "APRS"},
+                            {"hz": 146520000, "mode": 6, "power": 2, "channel": 1, "squelch": 3,
+                             "meter": 0, "busy": 0, "number": 1, "name": "Simplex"}]
+    app.radio = radio
+    app.page = 0
+    app.draw()
+    screen.save(folder / "benshi-radio.png")
+    app.page = 4
+    app.link_selected = 0
+    app.draw()
+    screen.save(folder / "benshi-link.png")
 
 
 

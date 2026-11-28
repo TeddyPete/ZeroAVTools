@@ -50,3 +50,12 @@ the Cardputer Zero's Linux filesystem and shared radio worker.
 - Reflector addresses are downloaded at run time from the Pi-Star host files
   (https://www.pistar.uk/downloads/) and cached under `~/.cache/rig-companion-zero/dstar-hosts`.
 - Optional name / city lookups for US callsigns use https://callook.info (public FCC data).
+
+## Benshi radio protocol
+
+- `rigzero/benshi.py` drives BTECH, Radioddity, Vero and Radtel "Benshi" radios
+  over the Bluetooth GAIA serial service. The command numbers and record
+  layouts follow the public protocol documentation in benlink
+  (https://github.com/khusmann/benlink, Apache-2.0, Kyle Husmann) and
+  HTCommander (https://github.com/Ylianst/HTCommander, Apache-2.0,
+  Ylian Saint-Hilaire). No source files are copied.

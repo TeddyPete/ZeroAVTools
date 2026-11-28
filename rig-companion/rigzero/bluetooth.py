@@ -6,9 +6,10 @@ import logging
 import socket
 import threading
 
-from .models import discovery_candidate
+from .models import GAIA_UUID, SPP_UUID, discovery_candidate
 
-SPP = "00001101-0000-1000-8000-00805f9b34fb"
+SPP = SPP_UUID
+GAIA = GAIA_UUID
 
 
 class BluetoothLink:
@@ -16,6 +17,7 @@ class BluetoothLink:
         self.events = queue.Queue(maxsize=32)
         self.waiting_confirmation = None
         self.pair_target = "TH-D75"
+        self.family = None          # "kenwood" or "benshi": which radios scans list
         self.radio_device = None
         self.socket = None
         self.bus = None
@@ -49,8 +51,8 @@ class BluetoothLink:
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
                 def AuthorizeService(self, device, uuid):
-                    if str(uuid).lower() != SPP:
-                        raise dbus.exceptions.DBusException("SPP only", name="org.bluez.Error.Rejected")
+                    if str(uuid).lower() not in (SPP, GAIA):
+                        raise dbus.exceptions.DBusException("Radio serial only", name="org.bluez.Error.Rejected")
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
                 def Cancel(self):
@@ -82,11 +84,15 @@ class BluetoothLink:
 
             self.agent = Agent(self.bus, "/org/rigcompanion/agent")
             self.profile = Profile(self.bus, "/org/rigcompanion/spp")
+            self.gaia_profile = Profile(self.bus, "/org/rigcompanion/gaia")
             self.manager = dbus.Interface(self.bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1")
             self.manager.RegisterAgent(self.agent.object_path, "DisplayYesNo")
             profiles = dbus.Interface(self.bus.get_object("org.bluez", "/org/bluez"), "org.bluez.ProfileManager1")
             profiles.RegisterProfile(self.profile.object_path, SPP,
                                      {"Name": "Rig Companion", "Role": "client", "RequireAuthentication": True})
+            # Benshi radios (UV-Pro, GA-5WB, VR-N76...) take commands on their GAIA serial service.
+            profiles.RegisterProfile(self.gaia_profile.object_path, GAIA,
+                                     {"Name": "Rig Companion radio control", "Role": "client"})
             self.loop = GLib.MainLoop()
             self.ready.set()
             self.loop.run()
@@ -169,12 +175,12 @@ class BluetoothLink:
         for path, interfaces in self.objects().items():
             props = interfaces.get("org.bluez.Device1", {})
             name = str(props.get("Alias", props.get("Name", "")))
-            if discovery_candidate(name, props.get("UUIDs", ())):
+            if discovery_candidate(name, props.get("UUIDs", ()), self.family):
                 devices.append({"path": str(path), "name": name, "address": str(props["Address"]),
                                 "paired": bool(props.get("Paired", False))})
         return devices
 
-    def connect(self, device):
+    def connect(self, device, service=SPP):
         import dbus
         self.radio_device = device["path"]
         if getattr(self, "scanning_adapter", None):
@@ -189,7 +195,7 @@ class BluetoothLink:
             logging.warning("Bluetooth pairing: requesting bond")
             self._call(remote.Pair, timeout=65)
             logging.warning("Bluetooth pairing: bond complete")
-        self._call(remote.ConnectProfile, SPP, timeout=15)
+        self._call(remote.ConnectProfile, service, timeout=15)
         if self.socket is None:
             raise RuntimeError("Radio did not open its serial Bluetooth service")
         return self.socket

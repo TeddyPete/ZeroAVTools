@@ -25,7 +25,7 @@ class Panels:
 
     def open(self, screen, state, section=0, query=""):
         self.screen, self.selected = screen, 0
-        if screen == "monitor":
+        if screen == "monitor" and self.app.family == "kenwood":
             self.app.show_steps("kiss", "Handset KISS on the TH-D75", (
                 "Menu 983 KISS: Bluetooth",
                 "Turn on KISS on the radio (TNC key until KISS shows)",
@@ -33,7 +33,7 @@ class Panels:
                 "When done, turn KISS off on the radio"),
                 note="The radio has no Bluetooth command for these steps.")
         if screen == "guide":
-            self.model = state.get("model") or MODEL_NAMES[0]
+            self.model = state.get("model") if state.get("model") in MODEL_NAMES else MODEL_NAMES[0]
             self.section, self.query = section, query
             self.detail, self.typing, self.scroll = None, False, 0
 

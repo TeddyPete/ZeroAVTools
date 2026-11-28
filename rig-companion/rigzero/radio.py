@@ -81,21 +81,7 @@ class Radio:
             before = self.decoder.invalid
             for command, payload in self.decoder.feed(data):
                 if command == 0:
-                    frame = decode_ax25(payload)
-                    if frame:
-                        self.record(frame, raw=payload)
-                    else:
-                        self.state["invalid"] += 1
-                    if self.remote_reply:
-                        self.remote_reply(kiss_encode(payload))
-                    if self.native:
-                        try:
-                            self.native.require("rx", payload, len(payload), milliseconds())
-                        except OSError:
-                            raise
-                        except Exception:
-                            self.packet_finish()
-                            raise
+                    self._rx_frame(payload)
             self.state["invalid"] += self.decoder.invalid - before
             return
         for byte in data:
@@ -108,6 +94,31 @@ class Radio:
                 self.discard = True
             elif not self.discard:
                 self.line.append(byte)
+
+    def _rx_frame(self, payload):
+        """One received AX.25 frame from the radio's TNC (any radio family)."""
+        frame = decode_ax25(payload)
+        if frame:
+            self.record(frame, raw=payload)
+        else:
+            self.state["invalid"] += 1
+        if self.remote_reply:
+            self.remote_reply(kiss_encode(payload))
+        if self.native:
+            try:
+                self.native.require("rx", payload, len(payload), milliseconds())
+            except OSError:
+                raise
+            except Exception:
+                self.packet_finish()
+                raise
+
+    def send_ax25(self, frame):
+        """Transmit one AX.25 frame through the radio's TNC."""
+        self.connection.sendall(kiss_encode(frame))
+
+    def send_kiss_param(self, payload, command):
+        self.connection.sendall(kiss_encode(payload, command))
 
     def record(self, frame, direction="RX", raw=None):
         packet = inspect_packet(*frame, direction=direction)
@@ -399,7 +410,7 @@ class Radio:
         if kind == 0:
             if self.state["owner"] not in ("terminal", "winlink") or not self.state["kiss"]:
                 raise RuntimeError("Packet session lost its radio link")
-            self.connection.sendall(kiss_encode(data))
+            self.send_ax25(data)
             decoded = decode_ax25(data)
             if decoded:
                 self.record(decoded, "TX", raw=data)
@@ -521,7 +532,7 @@ class Radio:
 
     def send_local_frame(self, frame):
         self.require_local_kiss()
-        self.connection.sendall(kiss_encode(frame))
+        self.send_ax25(frame)
         self.record(decode_ax25(frame), "TX", raw=frame)
 
     def configure_beacon(self, position, interval, expected_session, session_id, gps=False):
@@ -765,10 +776,10 @@ class Radio:
         if command == 0 and payload:
             if decode_ax25(payload) is None:
                 raise ValueError("Invalid AX.25 transmit frame")
-            self.connection.sendall(kiss_encode(payload))
+            self.send_ax25(payload)
             self.record(decode_ax25(payload), "TX", raw=payload)
         elif command in range(1, 6) and len(payload) == 1:
-            self.connection.sendall(kiss_encode(payload, command))
+            self.send_kiss_param(payload, command)
 
     def _remote_open(self, owner, reply):
         self.start_kiss(owner)
