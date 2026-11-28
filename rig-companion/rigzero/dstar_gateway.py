@@ -201,7 +201,9 @@ class RadioPort:
                 sent = self.sock.send(view) if self.sock else os.write(self.fd, view)
             except BlockingIOError:
                 if time.monotonic() > deadline:
-                    raise TimeoutError("Radio is not accepting gateway data")
+                    where = f" on Bluetooth ch {self.channel}" if self.sock else ""
+                    raise TimeoutError(f"Radio connected{where} but is not in gateway mode. "
+                                       "Check band A in DV, Menu 650 and 985.")
                 select.select([], [self.fileno()], [], .05)
                 continue
             view = view[sent:]
