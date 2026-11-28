@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+case "$1" in
+  configure)
+    # validate the sudoers drop-in; remove it if sudo would reject it
+    if command -v visudo >/dev/null 2>&1 && ! visudo -cf /etc/sudoers.d/tnt-remote >/dev/null 2>&1; then
+      echo "tnt-mcp-link: sudoers file failed validation, removing it" >&2
+      rm -f /etc/sudoers.d/tnt-remote
+    fi
+    [ -d /run/systemd/system ] && systemctl --global daemon-reload >/dev/null 2>&1 || true
+    if id pi >/dev/null 2>&1 && [ -S /run/user/$(id -u pi)/bus ]; then
+      R="XDG_RUNTIME_DIR=/run/user/$(id -u pi)"
+      if [ -f /var/lib/tnt-mcp-link/turn-on ]; then
+        # moved over from tnt-remote, whose removal switched the server off: switch it back on
+        su pi -s /bin/sh -c "$R systemctl --user daemon-reload; $R systemctl --user enable --now tnt-remote.service" >/dev/null 2>&1 || true
+      else
+        # reload pi's user manager so the new unit is seen, and restart the server if it is on
+        su pi -s /bin/sh -c "$R systemctl --user daemon-reload; $R systemctl --user try-restart tnt-remote.service" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f /var/lib/tnt-mcp-link/turn-on
+    ;;
+esac
+exit 0

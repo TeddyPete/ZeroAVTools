@@ -279,6 +279,15 @@ class Radio_(Screen):
             a.toggle_bias()
 
     def tick(self) -> None:
+        r, a = self.app.radio, self.app
+        if r.status == "No dongle" and not getattr(self, "_told", False):
+            self._told = True
+            a.show_steps(NO_DONGLE_STEPS)
+        elif r.status != "No dongle":
+            self._told = False
+        self._tick()
+
+    def _tick(self) -> None:
         self.app.dirty = True
 
     def render(self, surf, f) -> None:
@@ -396,8 +405,29 @@ class Radio_(Screen):
         surf.fill((255, 200, 90), (cx + (int(dsp.CW_PITCH / hz_px) if rx.mode == "CW" else 0), y0, 1, h))
 
 
+NO_DONGLE_STEPS = T.StepsPopup("Plug in the RTL-SDR", [
+    "Plug the RTL-SDR dongle into this device's USB port (straight in or with a short cable).",
+    "Screw an antenna onto its SMA jack (2 m / 70 cm for APRS and FM, a long wire for HF).",
+    "Wait a few seconds: the radio starts by itself once the dongle shows up."],
+    key="", ok="OK")
+
+FOX_STEPS = T.StepsPopup("Fox hunt setup", [
+    "Use a directional antenna (a small Yagi or tape-measure beam) on the RTL-SDR.",
+    "Tune to the hidden transmitter's frequency with Up/Down or 8 Freq.",
+    "Hold the antenna up, turn slowly and walk toward the strongest reading.",
+    "Close in, lower the gain with 4 (or add an attenuator) so the dongle doesn't overload."],
+    key="steps-fox", ok="OK start")
+
+APRS_STEPS = T.StepsPopup("APRS setup", [
+    "Use a 2 m antenna (vertical, outside or high up is best) on the RTL-SDR.",
+    "For distances, plug in the GPS or set your grid in Settings.",
+    "To see packets on the map, install Rig Companion: packets go to its APRS list too."],
+    key="steps-aprs", ok="OK start")
+
+
 class Fox(Screen):
     title = "Fox hunt"
+    steps = FOX_STEPS
     help = ("Find a hidden transmitter. The big number is the signal above the noise (dB). "
             "Turn slowly with a directional antenna and walk toward the peak. Gain is fixed "
             "here so the number means something; lower it with 4 as you get close (strong "
@@ -515,6 +545,7 @@ class Fox(Screen):
 
 class Aprs_(Screen):
     title = "APRS receive"
+    steps = APRS_STEPS
     help = ("Decodes APRS on 144.390 MHz (North America) with the SDR. Every packet also "
             "goes to Rig Companion's APRS list, inbox, weather page and map (when Rig "
             "Companion is installed). Distances use the GPS or the grid in Settings. "
@@ -784,6 +815,7 @@ class App:
         self.radio.cfg = self.cfg
         self.stack: list[Screen] = []
         self.helpview = None
+        self.steps = None                 # nomadui.StepsPopup shown over the screen
         self.quit = False
         self.dirty = True
         self.msg = ""
@@ -791,11 +823,21 @@ class App:
         self.share = Fs.Share()
         self._gps = None
         T.set_about(APP_TITLE, __version__)
+        T.set_popups("nomad-sdr")
 
     # -- helpers
     def push(self, s: Screen) -> None:
         self.stack.append(s)
         self.dirty = True
+        self.show_steps(getattr(s, "steps", None))
+
+    def show_steps(self, popup) -> None:
+        """Setup steps the user does by hand, over the current screen (not
+        once the user hid that popup with D)."""
+        if popup is not None and not T.steps_hidden(popup.key):
+            popup.top = 0
+            self.steps = popup
+            self.dirty = True
 
     def pop(self) -> None:
         if self.stack:
@@ -1085,6 +1127,7 @@ class App:
     # -- loop
     def run(self) -> None:
         A.recover()
+        self.t_start = time.monotonic()
         self.radio.start()
         self.push(Radio_(self))
         last = 0.0
@@ -1115,8 +1158,16 @@ class App:
             if self.helpview.handle(k) == "close":
                 self.helpview = None
             return
+        if self.steps is not None:
+            if self.steps.handle(k) == "close":
+                self.steps = None
+            return
         if k.name == "help":
-            self.helpview = T.HelpView(top.title, top.help or HELP_RADIO, top.keybar())
+            text = top.help or HELP_RADIO
+            st = getattr(top, "steps", None)
+            if st is not None:
+                text = st.title + "\n" + st.help_text() + "\n\n" + text
+            self.helpview = T.HelpView(top.title, text, top.keybar())
             return
         if not top.text_entry and top.soft(k):
             return
@@ -1130,6 +1181,12 @@ class App:
             self.helpview.render(surf, f)
         elif self.stack:
             self.stack[-1].render(surf, f)
+            if self.radio.status == "Starting" and not self.radio.error:
+                # opening the dongle takes a moment: never look locked up
+                T.draw_loading(surf, "Starting the RTL-SDR", self.t_start, f)
+                self.dirty = True
+            elif self.steps is not None:
+                self.steps.render(surf, f)
         if self.msg and time.monotonic() < self.msg_until:
             img = f["small"].render(self.msg, True, (255, 255, 255))
             w = min(W - 8, img.get_width() + 12)

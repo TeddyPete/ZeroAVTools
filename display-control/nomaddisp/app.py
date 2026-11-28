@@ -17,6 +17,7 @@ from .ui import BACK, DOWN, SELECT, UP, Busy, Confirm, Form, Message, Prompt, Sc
 
 APP_TITLE = "Nomad Display Control"
 T.set_about(APP_TITLE, __version__)
+T.set_popups("nomad-display-control")
 HELP_MAIN = ("Nomad Display Control turns projectors and TVs on and off, switches inputs and sets "
              "volume over the network: PJLink projectors, LG webOS, Samsung, Sony Bravia and "
              "Roku TVs. Find displays scans this network; Rooms switches a whole room at once. "
@@ -37,6 +38,7 @@ class App:
         self.busy: set[str] = set()           # display ids with a command running
         self.stack: list[Screen] = []
         self.helpview = None
+        self.steps = None                 # nomadui.StepsPopup shown over the screen
         self.dirty = True
         self.quit = False
         self._flash = ("", L.FG, 0.0)
@@ -44,7 +46,19 @@ class App:
     # ---- stack ----
     def push(self, s: Screen) -> None:
         self.stack.append(s)
+        st = getattr(s, "steps", None)       # setup steps the user must do by hand
+        if st is not None and not T.steps_hidden(st.key):
+            st.top = 0
+            self.steps = st
         self.dirty = True
+
+    def show_steps(self, popup) -> None:
+        """Show setup steps (nomadui.StepsPopup) over the current screen,
+        unless the user hid that popup with D."""
+        if popup is not None and not T.steps_hidden(popup.key):
+            popup.top = 0
+            self.steps = popup
+            self.dirty = True
 
     def pop(self, s: Screen | None = None) -> None:
         if s is None:
@@ -155,8 +169,15 @@ class App:
             if self.helpview.handle(k) == "close":
                 self.helpview = None
             return
+        if self.steps is not None:
+            if self.steps.handle(k) == "close":
+                self.steps = None
+            return
         if k.name == "help":
-            self.helpview = T.HelpView(top.title, top.help or HELP_MAIN, top.keybar())
+            text = top.help or HELP_MAIN
+            if getattr(top, "steps", None) is not None:
+                text = top.steps.title + "\n" + top.steps.help_text() + "\n\n" + text
+            self.helpview = T.HelpView(top.title, text, top.keybar())
             return
         if not top.text_entry and top.soft(k):
             return
@@ -165,13 +186,22 @@ class App:
     def draw(self) -> None:
         if not self.stack:
             return
+        surf, f = self.panel.surf, self.panel.fonts
         if self.helpview is not None:
-            self.helpview.render(self.panel.surf, self.panel.fonts)
+            self.helpview.render(surf, f)
             self.panel.flush()
             return
         s = self.stack[-1]
+        busy = s if isinstance(s, Busy) else None
+        if busy is not None and len(self.stack) > 1:
+            s = self.stack[-2]      # the Loading popup sits over the screen it came from
         rows, sel = s.rows()
-        self.panel.draw(s.title, rows, s.hint, sel, s.right(), s.keybar())
+        T.render(surf, s.title, rows, s.hint, sel, s.right(), f, s.keybar())
+        if busy is not None:
+            T.draw_loading(surf, busy.label, busy.t0, f)
+        elif self.steps is not None:
+            self.steps.render(surf, f)
+        self.panel.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -353,9 +383,10 @@ class DisplayScreen(List):
         if d.mac:
             out.append(("Wake-on-LAN", lambda: app.do(d, "wol", label="Wake-on-LAN"), d.mac[-8:]))
         out += [("Info", lambda: show_info(app, d)),
+                ("Setup steps", lambda: show_kind_steps(app, d.kind)) if d.kind in KIND_STEPS else None,
                 ("Edit settings", lambda: edit_display(app, d)),
                 ("Delete", lambda: delete_display(app, d, self), "", L.BAD)]
-        return out
+        return [o for o in out if o]
 
     def softkeys(self):
         app, d, caps = self.app, self.d, self.drv.caps
@@ -587,6 +618,12 @@ def wake_prompt(app):
         except (ValueError, OSError) as e:
             app.push(Message(app, "Wake-on-LAN", str(e), L.BAD))
     app.push(Prompt(app, "Wake-on-LAN", "MAC", "", send, help_text="Like 30:34:db:6e:bc:84 (any separator)"))
+    app.show_steps(T.StepsPopup("Wake-on-LAN", [
+        "On the display, turn on Wake-on-LAN or network standby (LG: Turn on via Wi-Fi; "
+        "Samsung: Power On with Mobile; Sony: Remote Start; projectors: Network standby).",
+        "Plug the display into wired Ethernet if you can: many only wake that way.",
+        "Find its MAC on the display's network info page (or Find displays fills it in)."],
+        key="wol", ok="OK done"))
 
 
 def delete_display(app, d, screen):
@@ -596,6 +633,45 @@ def delete_display(app, d, screen):
         app.pop(screen)
         app.flash(f"Deleted {d.name}", L.WARN)
     app.push(Confirm(app, "Delete", f"Remove {d.name} ({d.host}) from the list?", yes, yes="OK delete", no="ESC keep"))
+
+
+# Settings the display needs before it can be controlled. The app can't set
+# these itself, so they pop up once a display of that type is added.
+KIND_STEPS = {
+    "pjlink": ["On the projector, open the Network (or LAN) menu.",
+               "Turn PJLink on. If it has a PJLink password, type the same one here under Password / key.",
+               "Set network standby (standby mode: Network or Eco off), so it can be turned on from standby."],
+    "lg": ["On the TV: Settings > General > Devices > TV Management (or External Devices).",
+           "Turn on 'Turn on via Wi-Fi' (also called Mobile TV On) so the TV can be woken over the network.",
+           "Keep the TV on. Next, it asks to allow Nomad Display Control: press OK on the TV's remote."],
+    "samsung": ["On the TV: Settings > General > External Device Manager > Device Connection Manager.",
+                "Set Access Notification to First Time Only (or Always).",
+                "Settings > General > Network > Expert Settings: turn on Power On with Mobile.",
+                "Keep the TV on. Next, it asks to allow Nomad Display Control: choose Allow on the TV."],
+    "sony": ["On the TV: Settings > Network > Home Network > IP Control.",
+             "Set Authentication to Normal and Pre-Shared Key, and type a key (like 0000).",
+             "Type that same key here under Password / key.",
+             "Turn on Remote Start (Network > Remote Start) so it can be turned on over the network."],
+    "roku": ["On the Roku: Settings > System > Advanced system settings > Control by mobile apps.",
+             "Set Network access to Default (or Permissive).",
+             "For power on from standby: Settings > System > Power > Fast TV start on."],
+}
+
+
+def kind_steps(kind: str):
+    steps = KIND_STEPS.get(kind)
+    if not steps:
+        return None
+    return T.StepsPopup(f"Set up the {CHOICE_OF_KIND.get(kind, kind)}", steps, key=f"setup-{kind}",
+                        intro="Do these on the display once:", ok="OK done")
+
+
+def show_kind_steps(app, kind: str) -> None:
+    """Show the setup steps again, even after D hid them."""
+    p = kind_steps(kind)
+    if p is not None:
+        p.key = ""              # shown on request: no "don't show again"
+        app.show_steps(p)
 
 
 def edit_display(app, d: Display | None, then=None):
@@ -651,6 +727,8 @@ def edit_display(app, d: Display | None, then=None):
             then(d)
         elif new and DRIVERS[d.kind].needs_pairing and not d.secret:
             pair(app, d)
+        if new or changed_kind:
+            app.show_steps(kind_steps(d.kind))     # over the pairing question
     app.push(Form(app, "Add display" if new else "Edit display", fields, vals, saved, validate))
 
 

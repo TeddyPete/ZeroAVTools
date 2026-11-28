@@ -1,0 +1,16 @@
+# Nomad AI Bridge server (user service of the pi user; starts at boot through
+# lingering when switched On in the Nomad AI Bridge app).
+[Unit]
+Description=Nomad AI Bridge (MCP server for the CardputerZero)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nomad-ai-bridge --serve
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=default.target

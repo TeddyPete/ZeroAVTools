@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-wifi-share",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "app_name": "Nomad WiFi Share",
   "bin_name": "nomad-wifi-share",
   "description": "Share Wi-Fi to Ethernet, or Ethernet to a Wi-Fi hotspot",

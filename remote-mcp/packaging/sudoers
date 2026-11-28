@@ -1,0 +1,4 @@
+# TNT MCP Link: the pi user may run the TNT MCP Link root helper without a password.
+# The helper is used only while Admin (sudo) is switched on in the TNT MCP Link app.
+# Remove the tnt-remote package (or this file) to take it away.
+pi ALL=(root) NOPASSWD: /usr/lib/tnt-remote/rootrun

@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-sdr",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "app_name": "Nomad SDR",
   "bin_name": "nomad-sdr",
   "description": "Ham radio receiver for RTL-SDR dongles",

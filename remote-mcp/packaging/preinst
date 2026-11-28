@@ -1,0 +1,12 @@
+#!/bin/sh
+# Moving over from the old tnt-remote package: dpkg runs its prerm first, which
+# switches the server off (disable --now). Remember to switch it back on.
+set -e
+if [ "$1" = install ] && [ -f /var/lib/dpkg/info/tnt-remote.list ] && id pi >/dev/null 2>&1; then
+  home=$(getent passwd pi | cut -d: -f6)
+  # the server creates auth.json the first time it runs, so this marks a device that was in use
+  if [ -f "$home/.local/state/tnt-remote/auth.json" ]; then
+    mkdir -p /var/lib/tnt-mcp-link && touch /var/lib/tnt-mcp-link/turn-on
+  fi
+fi
+exit 0

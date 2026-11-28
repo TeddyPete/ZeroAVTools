@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-av-tester",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "app_name": "Nomad AV Tester",
   "bin_name": "nomad-av-tester",
   "description": "HDMI test patterns and audio test tones for AV installs",

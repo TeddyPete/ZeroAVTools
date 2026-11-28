@@ -1,0 +1,16 @@
+#!/bin/sh
+# Moving over from the old nomad-mcp package (the same app, renamed): dpkg runs
+# its prerm, which switches that server off. Remember whether it was on, so
+# postinst can move its settings over and switch the new one on.
+set -e
+if [ "$1" = install ] && [ -f /var/lib/dpkg/info/nomad-mcp.list ] && id pi >/dev/null 2>&1; then
+  home=$(getent passwd pi | cut -d: -f6)
+  mkdir -p /var/lib/nomad-ai-bridge
+  touch /var/lib/nomad-ai-bridge/from-nomad-mcp
+  # on at boot, or at least set up and used (auth.json exists once the server has run)
+  if [ -e "$home/.config/systemd/user/default.target.wants/nomad-mcp.service" ] || \
+     [ -f "$home/.local/state/nomad-mcp/auth.json" ]; then
+    touch /var/lib/nomad-ai-bridge/turn-on
+  fi
+fi
+exit 0

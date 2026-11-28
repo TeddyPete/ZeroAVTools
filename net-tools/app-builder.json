@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-net-tools",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "app_name": "Nomad Net Tools",
   "bin_name": "nomad-net-tools",
   "description": "Network tools for AV techs: scan, Dante/NDI discovery, find AV gear, terminal, sniffer",

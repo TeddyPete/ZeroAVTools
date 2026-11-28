@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+case "$1" in
+  configure)
+    # 0.2.4 renamed the module from tntremote to nomadbridge; drop the old folder's leftovers
+    rm -rf /usr/share/APPLaunch/lib/nomad-ai-bridge/tntremote
+    [ -d /run/systemd/system ] && systemctl --global daemon-reload >/dev/null 2>&1 || true
+    M=/var/lib/nomad-ai-bridge
+    if id pi >/dev/null 2>&1; then
+      home=$(getent passwd pi | cut -d: -f6)
+      # renamed from Nomad MCP: keep settings, sign-ins, the ngrok token and the ngrok program
+      if [ -f $M/from-nomad-mcp ]; then
+        for d in .config .local/state .local/lib; do
+          if [ -d "$home/$d/nomad-mcp" ] && [ ! -e "$home/$d/nomad-ai-bridge" ]; then
+            mv "$home/$d/nomad-mcp" "$home/$d/nomad-ai-bridge"
+          fi
+        done
+        rm -f "$home/.config/systemd/user/default.target.wants/nomad-mcp.service"
+        rm -f $M/from-nomad-mcp
+      fi
+      # reload pi's user manager so the new unit is seen, and restart the server if it is on
+      if [ -S /run/user/$(id -u pi)/bus ]; then
+        R="XDG_RUNTIME_DIR=/run/user/$(id -u pi)"
+        if [ -f $M/turn-on ]; then
+          su pi -s /bin/sh -c "$R systemctl --user daemon-reload; $R systemctl --user enable --now nomad-ai-bridge.service" >/dev/null 2>&1 || true
+          rm -f $M/turn-on
+        else
+          su pi -s /bin/sh -c "$R systemctl --user daemon-reload; $R systemctl --user try-restart nomad-ai-bridge.service" >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+    ;;
+esac
+exit 0

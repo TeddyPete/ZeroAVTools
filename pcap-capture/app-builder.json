@@ -1,6 +1,6 @@
 {
   "package_name": "nomad-packet-capture",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "app_name": "Nomad Packet Capture",
   "bin_name": "nomad-packet-capture",
   "description": "Capture .pcap files for Wireshark from the Ethernet port",
