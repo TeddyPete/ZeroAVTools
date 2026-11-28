@@ -162,7 +162,21 @@ def render_dstar(app, screen, store, radio, folder, temp):
     tools.screen, tools.selected = "heard", 0
     app.draw()
     screen.save(folder / "dstar-heard.png")
-    tools.screen, tools.category, tools.selected = "reflectors", 1, 1
+    from .dstar_nearby import Nearby
+    import time as _time
+    book = Nearby(temp)
+    book.places = {"104.237.157.7": [40.7, -74.0, "Newark, New Jersey", _time.time()],
+                   "74.208.200.42": [39.0, -77.5, "Ashburn, Virginia", _time.time()],
+                   "44.32.0.1": [44.95, -93.1, "St Paul, Minnesota", _time.time()],
+                   "44.32.0.2": [45.0, -93.3, "Minneapolis, Minnesota", _time.time()],
+                   "5.252.227.231": [52.4, 4.9, "Amsterdam, NL", _time.time()],
+                   "45.56.119.213": [41.9, -87.6, "Chicago, Illinois", _time.time()]}
+    tools.nearby = book
+    store.set("dstar_grid", "EN34ql")
+    tools.screen, tools.category, tools.selected = "reflectors", 1, 0
+    app.draw()
+    screen.save(folder / "dstar-nearby.png")
+    tools.screen, tools.category, tools.selected = "reflectors", 2, 1
     app.draw()
     screen.save(folder / "dstar-reflectors.png")
     tools.screen, tools.pick = "pick", ["REF030", "C"]

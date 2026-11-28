@@ -59,3 +59,9 @@ the Cardputer Zero's Linux filesystem and shared radio worker.
   (https://github.com/khusmann/benlink, Apache-2.0, Kyle Husmann) and
   HTCommander (https://github.com/Ylianst/HTCommander, Apache-2.0,
   Ylian Saint-Hilaire). No source files are copied.
+
+## Reflector locations
+
+- The Nearby reflector list looks up reflector server addresses with
+  ip-api.com's free batch endpoint (http://ip-api.com/batch, no key, at most
+  15 requests a minute, non-commercial use). Results are cached for 30 days.

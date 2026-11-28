@@ -1,5 +1,15 @@
 # Rig Companion for CardputerZero
 
+## 0.7.1 Nearby reflectors
+
+D-STAR > 5 Reflectors > 5 Type now starts with **Nearby**: reflectors sorted by
+distance from you, with miles and the server's city. Your position comes from
+the TH-D75 GPS, else **My grid** (D-STAR Setup), else the saved beacon
+position, else your callsign's grid (US calls, callook.info). Reflector lists
+only hold server addresses, so the app looks each address up once with the free
+ip-api.com batch service (about 2 minutes the first time, then cached 30 days).
+That is where the server is, which is usually but not always near its owner.
+
 ## 0.7.0 Radio packages, splash screen and USB CAT
 
 Radios are now separate packages. At launch a splash screen lists the radio

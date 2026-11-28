@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from .display import ACCENT, ALERT, DIM, INK, LINE, PANEL, SELECT, SELECT_DIM
 
-CATEGORIES = ("Favorites", "REF", "XRF", "XLX", "DCS")
+CATEGORIES = ("Favorites", "Nearby", "REF", "XRF", "XLX", "DCS")
 DEFAULT_FAVORITES = ["REF001C", "REF030C", "XRF757A"]
 GUIDE = ("TH-D75 setup\n"
          "1. Band A in DV mode (8 Start sets this over Bluetooth when the radio is connected).\n"
@@ -68,6 +68,9 @@ class DStarTools:
         self.hosts_loading = False
         self.call_edit = None       # text being typed on the call screen
         self.call_target = ""       # callsign last looked up there
+        self.edit_target = "query"  # what the typing box edits: "query" or "grid"
+        self.nearby = None
+        self.near_info = {}         # reflector -> (km, place) for the Nearby list
 
     # ------------------------------------------------------------------ helpers
     def gw(self):
@@ -102,6 +105,43 @@ class DStarTools:
                 self.hosts_loading = False
         self.app.background(work)
 
+    def nearby_book(self):
+        if self.nearby is None:
+            from .dstar_nearby import Nearby
+            self.nearby = Nearby(self.gw().hosts.folder.parent)
+        return self.nearby
+
+    def my_position(self):
+        """(lat, lon), where from: radio GPS, saved position, My grid, or your callsign's grid."""
+        from .dstar_nearby import grid_to_latlon, parse_latlon
+        gps = getattr(getattr(self.app.radio, "gps_clock", None), "position", lambda **_: None)(max_age=600)
+        if parse_latlon(gps):
+            return parse_latlon(gps), "GPS"
+        grid = self.store.get("dstar_grid", "")
+        if grid_to_latlon(grid):
+            return grid_to_latlon(grid), grid
+        if parse_latlon(self.store.get("beacon_position", "")):
+            return parse_latlon(self.store.get("beacon_position", "")), "saved position"
+        call = (self.store.get("callsign") or "").split("-")[0]
+        if call:
+            info = self.gw().callbook.get(call) if hasattr(self.gw(), "callbook") else None
+            if info and grid_to_latlon(info.get("grid", "")):
+                return grid_to_latlon(info["grid"]), info["grid"] + " (callsign)"
+        return None, ""
+
+    def nearby_rows(self):
+        origin, _ = self.my_position()
+        hosts = self.gw().hosts
+        if origin is None or not hosts.table:
+            return []
+        book = self.nearby_book()
+        if not book.busy and not book.error and not book.ready(hosts.table):
+            self.app.background(lambda: book.refresh(dict(hosts.table)))
+        rows = book.closest(hosts.table, origin)
+        rows = [row for row in rows if self.query in row[0]]
+        self.near_info = {name: (km, place) for name, km, place in rows}
+        return [name for name, _, _ in rows]
+
     def favorites(self):
         return self.store.get("dstar_favorites", DEFAULT_FAVORITES)
 
@@ -110,6 +150,8 @@ class DStarTools:
             recent = [r for r in self.store.get("dstar_recent", []) if r not in self.favorites()]
             rows = [r[:6] + " " + r[6:] for r in self.favorites() + recent]
             return [r for r in rows if self.query in r.replace(" ", "")]
+        if CATEGORIES[self.category] == "Nearby":
+            return self.nearby_rows()
         return self.gw().hosts.names(CATEGORIES[self.category], self.query)
 
     def setup_rows(self):
@@ -121,6 +163,7 @@ class DStarTools:
                 ("Callsign   " + (self.store.get("callsign") or "set under Link"), "callsign"),
                 ("Callsign routing (QuadNet)   " + ("On" if self.store.get("dstar_routing", True) else "Off"), "routing"),
                 ("My module   " + self.store.get("dstar_module", "B"), "module"),
+                ("My grid (for Nearby)   " + (self.store.get("dstar_grid", "") or "not set"), "grid"),
                 ("Update reflector lists", "hosts"),
                 ("Clear last heard", "clear"),
                 ("TH-D75 setup guide", "guide")]
@@ -140,10 +183,19 @@ class DStarTools:
             if name == "esc":
                 self.edit = None
             elif name == "enter":
+                if self.edit_target == "grid":
+                    from .dstar_nearby import grid_to_latlon
+                    if self.edit and not grid_to_latlon(self.edit):
+                        self.app.tell("Use a grid like EN34 or EN34ql")
+                        return
+                    self.store.set("dstar_grid", self.edit[:4].upper() + self.edit[4:].lower())
+                    self.edit, self.edit_target = None, "query"
+                    self.app.tell("My grid saved" if self.store.get("dstar_grid") else "My grid cleared")
+                    return
                 self.query, self.edit, self.selected = self.edit.upper(), None, 0
             elif name == "backspace":
                 self.edit = self.edit[:-1]
-            elif char and char.upper() in string.ascii_uppercase + string.digits and len(self.edit) < 7:
+            elif char and char.upper() in string.ascii_uppercase + string.digits and len(self.edit) < (8 if self.edit_target == "grid" else 7):
                 self.edit += char.upper()
             return
         if self.screen == "pick":
@@ -210,7 +262,7 @@ class DStarTools:
                 self.category = (self.category + 1) % len(CATEGORIES)
                 self.selected, self.query = 0, ""
             elif key == "6" or char == "/":
-                self.edit = self.query
+                self.edit, self.edit_target = self.query, "query"
             elif key == "8":
                 self.update_hosts(force=True)
             elif key == "7" and rows:
@@ -392,6 +444,8 @@ class DStarTools:
             self.screen = ""
             self.app.page = 4
             self.app.editor, self.app.edit_value = "callsign", self.store.get("callsign")
+        elif action == "grid":
+            self.edit, self.edit_target = self.store.get("dstar_grid", "") or "", "grid"
         elif action == "hosts":
             self.update_hosts(force=True)
         elif action == "clear":
@@ -427,6 +481,14 @@ class DStarTools:
         if notice and notice != self.seen_notice:
             self.seen_notice = notice
             self.app.tell(notice)
+        if self.edit is not None and self.edit_target == "grid":
+            d.header("My grid", "Nearby")
+            d.rect(8, 48, 304, 35, ALERT, 4)        # editing field: red (UI standard)
+            d.rect(10, 50, 300, 31, PANEL, 3)
+            d.text(self.edit + "_", 15, 53, INK, 23, 290)
+            d.text("Maidenhead grid, e.g. EN34 or EN34ql", 10, 97, DIM, 14, 300)
+            d.text("Enter save · Esc cancel · empty clears", 10, 130, DIM, 14, 300)
+            return
         if self.edit is not None:
             d.header("Find reflector", CATEGORIES[self.category])
             d.rect(8, 48, 304, 35, PANEL, 4)
@@ -502,13 +564,33 @@ class DStarTools:
         start = max(0, self.selected - 4)
         y = 41 if self.query else 30
         visible = 4 if self.query else 5
-        if not rows:
+        nearby = title == "Nearby"
+        if nearby and not rows:
+            origin, _ = self.my_position()
+            book = self.nearby_book()
+            if not self.gw().hosts.table:
+                d.text("No reflector lists yet · 8 Update", 10, y + 4, DIM, 14)
+            elif origin is None:
+                d.wrap("Where are you? Set My grid under S Setup, or get a GPS fix on the TH-D75.", y=y + 4, height=60, color=INK)
+            elif book.busy:
+                d.text(f"Finding reflector locations {book.done}/{book.total}", 10, y + 4, INK, 14, 300)
+                d.wrap("First time only, about 2 minutes. Saved for 30 days.", y=y + 26, height=40, color=DIM)
+            else:
+                d.wrap(book.error or "No located reflectors yet.", y=y + 4, height=60, color=DIM)
+        elif not rows:
             d.text("No reflectors" + (" yet · 8 Update" if not self.gw().hosts.table else ""), 10, y + 4, DIM, 14)
         for index, row in enumerate(rows[start:start + visible], start):
             chosen = index == self.selected
             if chosen:
                 d.rect(7, y, 306, 19, SELECT, 3)
             star = "★ " if row.replace(" ", "") in favorites or any(f.startswith(row) for f in favorites) else ""
+            if nearby and row in self.near_info:
+                km, place = self.near_info[row]
+                d.text(star + row, 12, y + 1, INK, 14, 90)
+                d.text(f"{km * 0.621371:,.0f} mi", 100, y + 2, INK if chosen else ACCENT, 12, 60)
+                d.text(place, 160, y + 2, SELECT_DIM if chosen else DIM, 12, 150)
+                y += 20
+                continue
             d.text(star + row, 12, y + 1, INK, 14, 200)
             address = self.gw().hosts.lookup(row.split(" ")[0])
             if address:
