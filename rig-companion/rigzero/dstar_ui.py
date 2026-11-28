@@ -15,7 +15,7 @@ from .display import ACCENT, ALERT, DIM, INK, LINE, PANEL, SELECT, SELECT_DIM
 CATEGORIES = ("Favorites", "REF", "XRF", "XLX", "DCS")
 DEFAULT_FAVORITES = ["REF001C", "REF030C", "XRF757A"]
 GUIDE = ("TH-D75 setup\n"
-         "1. Band A in DV mode.\n"
+         "1. Band A in DV mode (8 Start sets this over Bluetooth when the radio is connected).\n"
          "2. Menu 650 DV Gateway Mode: Reflector TERM Mode.\n"
          "3. Menu 651: your callsign.\n"
          "4. Menu 985 DV Gateway: Bluetooth (or USB).\n"

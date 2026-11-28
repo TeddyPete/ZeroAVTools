@@ -682,12 +682,27 @@ class Radio:
             self.link.disconnect()
         self.closed = True
 
-    def suspend(self, reason):
-        """Release the Bluetooth link so the D-STAR gateway can use the radio."""
+    def suspend(self, reason, dv_band=None):
+        """Release the Bluetooth link so the D-STAR gateway can use the radio.
+
+        dv_band (0 = A): first switch that band to DV mode over CAT and make it active.
+        """
         if self.native:
             raise RuntimeError("Disconnect Terminal or Winlink before D-STAR")
         if self.state["kiss"]:
             self.end_kiss()
+        note = ""
+        if dv_band is not None and self.connection and self.state.get("identity"):
+            try:
+                if self.query(f"MD {dv_band}") != f"MD {dv_band},1":
+                    self.cat(f"MD {dv_band},1")
+                    if self.query(f"MD {dv_band}") != f"MD {dv_band},1":
+                        raise RuntimeError("DV mode did not confirm")
+                if self.query("BC") != f"BC {dv_band}":
+                    self.cat(f"BC {dv_band}")
+                note = "Band A set to DV. "
+            except (RuntimeError, TimeoutError) as error:
+                note = f"Could not set DV mode ({error}). "
         self.stop_beacon()
         self.remote_reply = None
         if self.connection and self.link:
@@ -696,7 +711,7 @@ class Radio:
         self.suspended = reason
         self.gps_clock.break_stream()
         self.update(connected=False, identity=False, kiss=False, owner="",
-                    status=f"{reason} is using the radio", error="")
+                    status=f"{note}{reason} is using the radio", error="", dv_note=note.strip())
 
     def resume(self):
         self.suspended = ""

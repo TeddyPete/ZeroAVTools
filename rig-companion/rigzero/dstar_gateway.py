@@ -419,8 +419,8 @@ class DStarGateway:
             radio_state = self.radio.snapshot()
             if radio_state.get("kiss") or radio_state.get("owner"):
                 raise RuntimeError("End KISS / packet sessions before starting D-STAR")
-            self.radio.submit("suspend", "D-STAR gateway")
-            deadline = time.monotonic() + 4
+            self.radio.submit("suspend", "D-STAR gateway", 0)
+            deadline = time.monotonic() + 6
             while self.radio.snapshot().get("connected") and time.monotonic() < deadline:
                 time.sleep(.1)
         kind = self.store.get("dstar_port", "bt")
@@ -441,7 +441,9 @@ class DStarGateway:
             raise
         self.decoder = MmdvmDecoder()
         self.last_radio = time.monotonic()
-        self.update(running=True, transport=self.port.label, radio="Waiting for radio (Menu 650)", version="")
+        dv = (self.radio.snapshot().get("dv_note", "") if self.radio else "")
+        self.update(running=True, transport=self.port.label, radio="Waiting for radio (Menu 650)", version="",
+                    notice=dv or self.state["notice"])
         self.port.write(mmdvm_frame(GET_VERSION))
         self.next_status = time.monotonic() + 1
         self._open_routing()
