@@ -7,7 +7,7 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
 PACKAGE = "rig-companion-zero"
-VERSION = "0.5.0-1"
+VERSION = "0.5.1-1"
 
 
 def build():
@@ -33,7 +33,7 @@ Depends: python3, python3-pygame, python3-numpy, python3-dbus, python3-gi, pytho
 Description: Rig Companion TH-D75 controls, APRS and D-STAR for CardputerZero
  Keyboard radio controls, native APRS receive, persistent messages,
  weather, packet tools, optional BLE/TCP KISS bridges and a D-STAR
- reflector terminal. Hardware qualification beta.
+ reflector terminal with QuadNet callsign routing. Hardware qualification beta.
 """)
     launcher = """#!/bin/sh
 export PYTHONPATH=/usr/share/APPLaunch/lib/rig-companion-zero

@@ -43,6 +43,10 @@ the Cardputer Zero's Linux filesystem and shared radio worker.
   and DroidStar (Doug McLain AD8DP, GPL-3.0): MMDVM serial framing, D-STAR header
   CRC, slow data, DExtra, DCS and DPlus packets, and the D-Plus registration ping.
   No source files are copied.
+- `rigzero/dstar_route.py` (callsign routing) follows the ircDDB client and G2
+  behaviour of ircDDBGateway (ircDDB library by Michael Dirska DL1BFF and
+  Jonathan Naylor G4KLX, GPL-2.0-or-later). No source files are copied. It
+  connects to the QuadNet ircDDB server (ircv4.openquad.net:9007) at run time.
 - Reflector addresses are downloaded at run time from the Pi-Star host files
   (https://www.pistar.uk/downloads/) and cached under `~/.cache/rig-companion-zero/dstar-hosts`.
 - Optional name / city lookups for US callsigns use https://callook.info (public FCC data).

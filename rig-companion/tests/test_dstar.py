@@ -174,6 +174,7 @@ class GatewayTests(unittest.TestCase):
         self.store = Store(folder)
         self.store.set("callsign", "N0TNT-7")
         self.store.set("dstar_lookup", False)
+        self.store.set("dstar_routing", False)
         self.store.set("device", {"address": "00:11:22:33:44:55"})
         self.radio_side, gateway_side = socket.socketpair()
         self.radio_side.settimeout(.05)

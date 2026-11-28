@@ -104,6 +104,14 @@ def render_dstar(app, screen, store, radio, folder, temp):
     gateway.state.update(running=True, transport="Bluetooth ch 2", radio="Radio ready", version="TH-D75",
                          link="Linked", reflector="XRF757", module="A", protocol="DExtra",
                          linked_at=at(600), heard=heard, notice="", error="")
+    from .dstar_route import IrcDDB
+    irc = IrcDDB("N0CALL", temp / "routes.json")
+    irc.state, irc.online = "Ready", 2914
+    irc.book.join("n0demo-1", "203.0.113.7")
+    irc.book.apply((1, "2026-11-28 11:41:37", "N0DEMO_B", "N0DEMO__", []))
+    irc.book.apply((0, "2026-11-28 11:41:37", "N0DEMO__", "N0DEMO_B", []))
+    irc.start = lambda: None
+    gateway.ircddb = irc
     tools = app.dstar
     tools.gateway = gateway
     tools.seen_notice = ""
@@ -131,5 +139,9 @@ def render_dstar(app, screen, store, radio, folder, temp):
     tools.screen, tools.entry, tools.offset = "entry", dict(heard[0], name="Example Operator", place="Minneapolis, MN"), 0
     app.draw()
     screen.save(folder / "dstar-detail.png")
+    irc.pending["N0DEMO"] = 0.0
+    tools.screen, tools.call_edit, tools.call_target = "call", None, "N0DEMO"
+    app.draw()
+    screen.save(folder / "dstar-call.png")
     tools.screen = ""
     gateway.state["running"] = False

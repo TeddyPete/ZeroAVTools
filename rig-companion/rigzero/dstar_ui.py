@@ -22,6 +22,9 @@ GUIDE = ("TH-D75 setup\n"
          "5. Here: 8 Start, then 5 Link a reflector.\n"
          "\nTalk with UR = CQCQCQ. From the radio, UR commands also work:\n"
          "REF001CL links REF001 C, 7 spaces + U unlinks, + E echo test, + I link info.\n"
+         "\nCallsign routing (QuadNet, like a Pi-Star hotspot): put a callsign in UR, "
+         "or press D here and type one. Calls to you arrive when UDP port 40000 is "
+         "forwarded to the Cardputer on your router; calls out work without it.\n"
          "\nREF reflectors need gateway registration (regist.dstargateway.org) to transmit. "
          "XRF, XLX and DCS do not.\n"
          "\nThe TH-D75 transmits nothing on RF in this mode. It has no Access Point mode.")
@@ -56,6 +59,8 @@ class DStarTools:
         self.entry = None
         self.seen_notice = ""
         self.hosts_loading = False
+        self.call_edit = None       # text being typed on the call screen
+        self.call_target = ""       # callsign last looked up there
 
     # ------------------------------------------------------------------ helpers
     def gw(self):
@@ -99,6 +104,8 @@ class DStarTools:
                 ("Relink last reflector   " + ("On" if self.store.get("dstar_relink", True) else "Off"), "relink"),
                 ("Name lookup (callook.info)   " + ("On" if self.store.get("dstar_lookup", True) else "Off"), "lookup"),
                 ("Callsign   " + (self.store.get("callsign") or "set under Link"), "callsign"),
+                ("Callsign routing (QuadNet)   " + ("On" if self.store.get("dstar_routing", True) else "Off"), "routing"),
+                ("My module   " + self.store.get("dstar_module", "B"), "module"),
                 ("Update reflector lists", "hosts"),
                 ("Clear last heard", "clear"),
                 ("TH-D75 setup guide", "guide")]
@@ -127,9 +134,12 @@ class DStarTools:
         if self.screen == "pick":
             self.press_pick(name, key)
             return
+        if self.screen == "call" and self.call_edit is not None:
+            self.press_call_edit(name, char)
+            return
         back = name == "esc" or key == "4" or (name == "left" and self.screen != "pick")
         if back:
-            parents = {"home": "", "reflectors": "home", "heard": "home", "setup": "home",
+            parents = {"home": "", "reflectors": "home", "heard": "home", "setup": "home", "call": "home",
                        "entry": "heard", "guide": "setup", "help": "home"}
             target = parents.get(self.screen, "home")
             if self.screen == "entry" and self.entry is not None and self.entry.get("_from") == "home":
@@ -151,6 +161,8 @@ class DStarTools:
             elif key == "7":
                 if snap["link"] in ("Linked", "Linking"):
                     gw.submit("unlink")
+                elif snap["route_to"]:
+                    self.route(None)
                 else:
                     last = (self.store.get("dstar_recent", []) or [""])[0]
                     if len(last) == 7:
@@ -165,6 +177,8 @@ class DStarTools:
                     self.start(state)
             elif key == "s":
                 self.open("setup")
+            elif key == "d":
+                self.open_call()
             elif key == "m":
                 talker = snap["talker"] or (snap["heard"][0] if snap["heard"] else None)
                 if talker:
@@ -208,6 +222,16 @@ class DStarTools:
                 self.show_on_map(self.entry)
             elif name in ("up", "down") or key in ("f", "x"):
                 self.offset = max(0, self.offset + (-1 if name == "up" or key == "f" else 1))
+        elif self.screen == "call":
+            if name in ("enter", "right"):
+                self.call_edit = self.call_target
+            elif key == "8" and self.call_target:
+                self.route(self.call_target)
+                self.open("home")
+            elif key == "7":
+                self.route(None)
+            elif key == "5" and self.call_target:
+                self.lookup(self.call_target)
         elif self.screen == "setup":
             rows = self.setup_rows()
             if name in ("enter", "right") and rows:
@@ -238,6 +262,42 @@ class DStarTools:
             self.start_if_needed(snap)
             self.gw().submit("link", self.pick[0], self.pick[1])
             self.open("home")
+
+    # ------------------------------------------------------------------ callsign routing
+    def open_call(self):
+        self.open("call")
+        self.call_edit = ""
+        if self.gw().ensure_ircddb() is None:
+            self.app.tell("Callsign routing is off (S setup)" if self.store.get("callsign") else "Set your callsign under Link first")
+
+    def press_call_edit(self, name, char):
+        if name == "esc":
+            self.call_edit = None
+        elif name == "enter":
+            call, self.call_edit = self.call_edit.strip().upper(), None
+            if call:
+                self.call_target = call
+                self.lookup(call)
+        elif name == "backspace":
+            self.call_edit = self.call_edit[:-1]
+        elif char and (char.isalnum() or char == "/") and len(self.call_edit) < 8:
+            self.call_edit += char.upper()
+
+    def lookup(self, call):
+        irc = self.gw().ensure_ircddb()
+        if irc is None:
+            self.app.tell("Turn on callsign routing in setup")
+            return
+        irc.find(call)
+
+    def route(self, call):
+        try:
+            self.gw().route_to(call or "")
+        except Exception as error:
+            self.app.tell(str(error))
+            return
+        if call:
+            self.app.tell(f"CQCQCQ now goes to {call} (direct)")
 
     def toggle_favorite(self, row):
         name, _, module = row.partition(" ")
@@ -282,6 +342,15 @@ class DStarTools:
             self.store.set("dstar_relink", not self.store.get("dstar_relink", True))
         elif action == "lookup":
             self.store.set("dstar_lookup", not self.store.get("dstar_lookup", True))
+        elif action == "routing":
+            on = not self.store.get("dstar_routing", True)
+            self.store.set("dstar_routing", on)
+            if not on:
+                gw.stop_ircddb()
+            self.app.tell("Callsign routing " + ("on (applies at next Start)" if on else "off"))
+        elif action == "module":
+            letter = self.store.get("dstar_module", "B")
+            self.store.set("dstar_module", "ABCD"[("ABCD".index(letter) + 1) % 4] if letter in "ABCD" else "B")
         elif action == "callsign":
             self.screen = ""
             self.app.page = 4
@@ -340,10 +409,14 @@ class DStarTools:
                     line += "  ·  listen only"
             elif link == "Linking":
                 line = f"Linking {snap['reflector']} {snap['module']}…"
+            elif snap["route_to"]:
+                line = f"Direct call to {snap['route_to']}  ·  7 clear"
             else:
-                line = "Not linked · 5 Link a reflector"
-            d.text(line, 10, 29, ACCENT if link == "Linked" else INK, 14, 300)
-            d.text(snap["radio"] + ("  ·  " + snap["transport"] if snap["transport"] else ""), 10, 47, DIM, 12, 300)
+                line = "Not linked · 5 Link · D Direct call"
+            d.text(line, 10, 29, ACCENT if link == "Linked" or snap["route_to"] else INK, 14, 300)
+            routing = self.gw().routing_status() if self.store.get("dstar_routing", True) else ""
+            status = snap["radio"] + ("  ·  " + routing.replace(" online", "") if routing else "")
+            d.text(status, 10, 47, DIM, 12, 300)
         else:
             d.text("Reflector terminal is off", 10, 29, INK, 14, 300)
             d.text("8 Start  ·  S Setup  ·  ? Help", 10, 47, DIM, 12, 300)
@@ -366,10 +439,11 @@ class DStarTools:
                 d.text(entry["call"], 14, y + 1, ACCENT, 14, 110)
                 d.text(f"{ago(entry['time'])} ago  {entry.get('seconds', 0):.0f}s", 214, y + 2, DIM, 12, 94)
                 d.text(entry.get("message") or entry.get("name") or entry.get("reflector", ""), 14, y + 14, INK, 12, 292)
-        hint = "Enter details · M map · S setup · ? help"
+        hint = "Enter details · D direct · M map · S setup"
         d.text(hint, 10, 130, DIM, 12, 302)
         linked = snap["link"] in ("Linked", "Linking")
-        d.footer(labels=["Back", "Link", "Heard", "Unlink" if linked else "Relink", "Stop" if snap["running"] else "Start"])
+        seven = "Unlink" if linked else ("Clear" if snap["route_to"] else "Relink")
+        d.footer(labels=["Back", "Link", "Heard", seven, "Stop" if snap["running"] else "Start"])
 
     def draw_reflectors(self, d, snap):
         rows = self.reflector_rows()
@@ -444,6 +518,40 @@ class DStarTools:
         d.wrap("\n".join(lines), y=31, height=110, offset=self.offset)
         d.footer(labels=["Back", "Map" if e.get("lat") is not None else "", "", "", ""])
 
+    def draw_call(self, d, snap):
+        gw = self.gw()
+        d.header("Direct call", "QuadNet")
+        d.rect(8, 28, 304, 33, PANEL, 4)
+        if self.call_edit is not None:
+            d.text(self.call_edit + "_", 15, 32, ALERT, 23, 290)
+        else:
+            d.text(self.call_target or "Enter to type", 15, 32, ACCENT if self.call_target else DIM, 23, 290)
+        irc = gw.ircddb
+        lines = []
+        if self.call_edit is not None:
+            lines = ["Type a callsign, Enter looks it up", "Esc cancels"]
+        elif self.call_target and irc:
+            answer, route = irc.result(self.call_target)
+            if answer == "wait":
+                lines = ["Looking up on QuadNet…"]
+            elif route:
+                when = route["stamp"][11:16] + " UTC" if route["stamp"] else ""
+                lines = [f"Last on {route['repeater'].strip()}  {when}",
+                         f"Gateway {route['gateway'].strip()}" + ("  · online" if route["ip"] else "  · offline")]
+            else:
+                lines = ["Not heard on QuadNet"]
+        elif not irc:
+            lines = ["Callsign routing is off (S setup)"]
+        y = 68
+        for line in lines:
+            d.text(line, 10, y, INK, 14, 300)
+            y += 19
+        d.text(gw.routing_status(), 10, 112, DIM, 12, 300)
+        if snap["route_to"]:
+            d.text("CQCQCQ goes to " + snap["route_to"], 10, 127, ACCENT, 12, 300)
+        d.footer(labels=["Back", "Find" if self.call_target else "", "", "Clear" if snap["route_to"] else "",
+                         "Talk" if self.call_target else ""])
+
     def draw_setup(self, d, snap):
         d.header("D-STAR setup", "Running" if snap["running"] else "Off")
         rows = [label for label, _ in self.setup_rows()]
@@ -466,6 +574,8 @@ class DStarTools:
         d.header("D-STAR keys")
         text = ("5 Link reflector · 6 Last heard\n7 Unlink / relink last · 8 Start / stop\n"
                 "Enter talker details · M map · S setup\nReflectors: 5 type · 6 find · 7 fav · 8 update\n"
+                "D direct call: type a callsign, Enter finds it, 8 Talk sends CQCQCQ there\n"
+                "Or put a callsign in the radio's UR field\n"
                 "Esc back · hold Esc exit")
         self.max_offset = max(0, d.wrap(text, y=30, height=112, offset=self.offset) - 6)
         d.footer(labels=["Back", "", "", "", ""])

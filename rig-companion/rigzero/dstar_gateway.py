@@ -24,8 +24,9 @@ from . import __version__
 from .dstar import (DSTAR_DATA, DSTAR_EOT, DSTAR_HEADER, DSTAR_LOST, GET_STATUS, GET_VERSION, ACK, NAK,
                     MODE_DSTAR, NULL_AMBE, SET_MODE, SYNC, Header, MmdvmDecoder, Reflector, SlowData,
                     dplus_auth_packet, dprs_to_tnc2, encode_message, is_sync, mmdvm_config, mmdvm_frame,
-                    module_call, parse_hosts, reflector_kind, slow_data_for, urcall_command, valid_reflector,
+                    module_call, pad, parse_hosts, reflector_kind, slow_data_for, urcall_command, valid_reflector,
                     version_text)
+from .dstar_route import G2_PORT, IrcDDB, g2_data_packet, g2_header_packet, parse_g2
 from .protocol import decode_tnc2, inspect_packet
 
 HOST_FILES = {"REF": "DPlus_Hosts.txt", "XRF": "DExtra_Hosts.txt", "DCS": "DCS_Hosts.txt", "XLX": "XLXHosts.txt"}
@@ -232,6 +233,9 @@ class Stream:
         self.seq = 0
         self.stream_id = 0
         self.net_header = None
+        self.route = None               # direct call: {"call", "state", "ip", "header"}
+        self.held = []                  # frames kept while the route is looked up
+        self.g2 = None                  # sender address of an incoming direct call
         self.entry = {"call": header.caller, "suffix": header.suffix.strip(), "ur": header.ur.strip(),
                       "rpt1": header.rpt1.strip(), "rpt2": header.rpt2.strip(), "source": source,
                       "reflector": reflector, "time": now_iso(), "seconds": 0.0, "message": "",
@@ -262,12 +266,16 @@ class DStarGateway:
         self.last_net = self.last_radio = 0.0
         self.link_started = 0.0
         self.relink_at = 0.0
+        self.ircddb = None
+        self.g2 = None
+        self.g2_counter = 0
         heard = store.get("dstar_heard", []) or []
         self.state = {"running": False, "transport": "", "radio": "Gateway off", "version": "",
                       "link": "Unlinked", "reflector": "", "module": "", "protocol": "", "linked_at": "",
                       "keepalive_age": None, "net_rx": 0, "net_tx": 0, "radio_frames": 0, "nak": 0,
                       "talker": None, "heard": heard[:HEARD_LIMIT], "error": "", "notice": "",
-                      "read_only": False, "status_text": ""}
+                      "read_only": False, "status_text": "",
+                      "route_to": store.get("dstar_route_to", "") or "", "routing": "Off", "g2_port": 0}
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -295,6 +303,50 @@ class DStarGateway:
             self.update(error="D-STAR command queue full")
             return False
 
+    def routing_enabled(self):
+        return bool(self.store.get("dstar_routing", True))
+
+    def my_repeater(self):
+        return module_call(base_call(self.store.get("callsign")), self.store.get("dstar_module", "B"))
+
+    def my_gateway(self):
+        return module_call(base_call(self.store.get("callsign")), "G")
+
+    def ensure_ircddb(self):
+        """Start the QuadNet client (also used by the lookup screen while the gateway is off)."""
+        call = base_call(self.store.get("callsign"))
+        if not call or not self.routing_enabled():
+            return None
+        if self.ircddb is None or self.ircddb.callsign != call[:7]:
+            if self.ircddb:
+                self.ircddb.stop()
+            self.ircddb = IrcDDB(call, self.hosts.folder.parent / "ircddb-routes.json")
+        self.ircddb.start()
+        return self.ircddb
+
+    def route_to(self, call):
+        """Set (or clear with '') the direct-call target from the UI."""
+        if self.state["running"]:
+            return self.submit("route", call) if call else self.submit("unroute")
+        if call:
+            self._do_route(call)
+        else:
+            self._do_unroute()
+        return True
+
+    def stop_ircddb(self):
+        if self.ircddb:
+            self.ircddb.stop()
+            self.ircddb = None
+
+    def routing_status(self):
+        if not self.ircddb:
+            return "Off" if not self.routing_enabled() else "Not connected"
+        info = self.ircddb.status()
+        if info["state"] == "Ready":
+            return f"QuadNet ready · {info['online']} online"
+        return f"QuadNet {info['state'].lower()}" + (f": {info['error']}" if info["error"] else "")
+
     def refresh_hosts(self, force=False):
         if force or self.hosts.stale():
             self.hosts.refresh()
@@ -305,6 +357,7 @@ class DStarGateway:
             self.submit("stop")
             self.thread.join(timeout)
         self.stop_event.set()
+        self.stop_ircddb()
 
     # ------------------------------------------------------------------ worker
     def _run(self):
@@ -329,7 +382,7 @@ class DStarGateway:
         if not self.state["running"]:
             self.stop_event.wait(.05)
             return
-        sockets = [s for s in (self.port, self.udp) if s is not None]
+        sockets = [s for s in (self.port, self.udp, self.g2) if s is not None]
         timeout = .02
         if self.out:
             timeout = max(0, min(timeout, self.next_out - time.monotonic()))
@@ -348,6 +401,13 @@ class DStarGateway:
             if packet and self.reflector and sender[0] == self.peer[0]:
                 self.last_net = time.monotonic()
                 self._from_net(packet)
+        if self.g2 and self.g2 in ready:
+            try:
+                packet, sender = self.g2.recvfrom(2048)
+            except (BlockingIOError, InterruptedError):
+                packet = None
+            if packet:
+                self._from_g2(packet, sender)
         self._timers()
 
     def _do_start(self):
@@ -382,9 +442,36 @@ class DStarGateway:
         self.update(running=True, transport=self.port.label, radio="Waiting for radio (Menu 650)", version="")
         self.port.write(mmdvm_frame(GET_VERSION))
         self.next_status = time.monotonic() + 1
+        self._open_routing()
         favourite = self.store.get("dstar_autolink", "") if self.store.get("dstar_relink", True) else ""
         if favourite and valid_reflector(favourite[:6]) and len(favourite) >= 7:
             self.actions.put_nowait(("link", favourite[:6], favourite[6]))
+
+    def _open_routing(self):
+        if not self.routing_enabled():
+            self.update(routing="Off")
+            return
+        irc = self.ensure_ircddb()
+        if irc is None:
+            return
+        call = base_call(self.store.get("callsign"))
+        irc.heard(my=call, suffix="", ur="CQCQCQ", rpt1=self.my_repeater(), rpt2=self.my_gateway())
+        if self.g2 is None:
+            self.g2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.g2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.g2.bind(("", G2_PORT))
+            except OSError:
+                self.g2.bind(("", 0))
+                self.update(notice=f"UDP {G2_PORT} busy: direct calls in won't arrive")
+            self.g2.setblocking(False)
+            self.update(g2_port=self.g2.getsockname()[1])
+
+    def _close_routing(self):
+        if self.g2:
+            self.g2.close()
+            self.g2 = None
+        self.update(g2_port=0)
 
     @staticmethod
     def _find_usb():
@@ -402,6 +489,8 @@ class DStarGateway:
             self.radio.submit("resume")
         self.out.clear()
         self.rx = self.tx = None
+        self._close_routing()
+        self.stop_ircddb()
         self.update(running=False, transport="", radio="Gateway off", talker=None)
         self.stop_event.set()
 
@@ -415,6 +504,7 @@ class DStarGateway:
             self.port = None
             if self.radio:
                 self.radio.submit("resume")
+        self._close_routing()
         self.update(running=False, radio="Gateway off")
 
     def _radio_lost(self, reason):
@@ -424,6 +514,7 @@ class DStarGateway:
         self._unlink(quiet=True)
         if self.radio and self.state["running"]:
             self.radio.submit("resume")
+        self._close_routing()
         self.update(running=False, radio="Radio link lost", error=reason, talker=None)
         self.stop_event.set()
 
@@ -443,6 +534,7 @@ class DStarGateway:
         if address is None:
             raise RuntimeError(f"{name} is not in the reflector list")
         self._unlink(quiet=True)
+        self._set_route_to("")
         host, port = address
         info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
         self.reflector = Reflector(name, module, call)
@@ -460,6 +552,120 @@ class DStarGateway:
                     keepalive_age=None, read_only=False, status_text="")
         recent = [entry for entry in self.store.get("dstar_recent", []) if entry != name + module]
         self.store.set("dstar_recent", ([name + module] + recent)[:12])
+
+    # ------------------------------------------------------------------ direct calls (callsign routing)
+    def _set_route_to(self, call):
+        call = (call or "").upper().strip()
+        self.store.set("dstar_route_to", call)
+        self.update(route_to=call)
+
+    def _do_route(self, call):
+        """Talk straight to one callsign: CQCQCQ from the radio is routed to it."""
+        call = base_call(call)[:8]
+        if not call:
+            raise ValueError("Type a callsign")
+        if call == base_call(self.store.get("callsign")):
+            raise ValueError("That's your own callsign")
+        if self.reflector:
+            self._do_unlink()
+        self._set_route_to(call)
+        irc = self.ensure_ircddb()
+        if irc is None:
+            raise RuntimeError("Turn on callsign routing in D-STAR setup")
+        irc.find(call)
+        self.update(notice=f"Calls go to {call} (direct)")
+
+    def _do_unroute(self):
+        self._set_route_to("")
+        self.update(notice="Direct calls off")
+
+    def _start_route(self, stream, call, header):
+        irc = self.ircddb
+        if irc is None:
+            stream.route = {"call": call, "state": "failed", "why": "routing off"}
+            return
+        stream.route = {"call": call, "state": "wait", "ip": "", "header": header}
+        route = irc.lookup(call)
+        if route:
+            self._route_found(stream, route)
+        else:
+            self.update(notice=f"Looking up {call}…")
+
+    def _route_found(self, stream, route):
+        if route["repeater"].strip() == self.my_repeater().strip():
+            stream.route.update(state="failed", why="that's you")
+            return
+        radio = stream.route["header"]
+        header = Header(rpt2=route["repeater"], rpt1=route["gateway"], ur=pad(stream.route["call"]),
+                        my=radio.my, suffix=radio.suffix, flags=b"\x00\x00\x00")
+        stream.route.update(state="ok", ip=route["ip"], port=route.get("port", G2_PORT), net=header,
+                            repeater=route["repeater"].strip())
+        stream.entry["reflector"] = f"Direct {stream.route['call']} via {route['repeater'].strip()}"
+        target = (route["ip"], route.get("port", G2_PORT))
+        for _ in range(5):
+            self._send_g2(g2_header_packet(header, stream.stream_id), target)
+        for seq, frame in stream.held:
+            self._send_g2(g2_data_packet(stream.stream_id, seq, frame), target)
+        stream.held = []
+        self.update(notice=f"Calling {stream.route['call']} at {route['repeater'].strip()}",
+                    talker=copy.deepcopy(stream.entry))
+
+    def _check_route(self, stream):
+        route = stream.route
+        if not route or route["state"] != "wait" or not self.ircddb:
+            return
+        answer, found = self.ircddb.result(route["call"])
+        if answer == "ok":
+            self._route_found(stream, found)
+        elif answer == "missing":
+            why = "not on QuadNet" if not found else "gateway offline"
+            route.update(state="failed", why=why)
+            stream.held = []
+            self.update(notice=f"{route['call']} {why}")
+
+    def _send_g2(self, packet, target):
+        if self.g2:
+            try:
+                self.g2.sendto(packet, target)
+            except OSError:
+                return
+            with self.lock:
+                self.state["net_tx"] += 1
+
+    def _from_g2(self, packet, sender):
+        frame = parse_g2(packet)
+        if frame.kind == "header":
+            header = frame.header
+            if header.flags[0] & 0x01:                      # busy reply
+                return
+            mine = base_call(self.store.get("callsign"))
+            to_me = header.rpt2.strip() == self.my_repeater().strip() or base_call(header.ur) == mine
+            if not to_me or self.tx or (self.rx and self.rx.g2 != sender):
+                return
+            if self.rx and self.rx.stream_id == frame.stream:
+                return                                      # repeated header
+            if self.rx:
+                self._end_rx(lost=True)
+            self.rx = Stream("NET", header, "Direct call")
+            self.rx.stream_id, self.rx.g2 = frame.stream, sender
+            to_radio = Header(rpt2=self.my_gateway(), rpt1=self.my_repeater(), ur=header.ur, my=header.my,
+                              suffix=header.suffix, flags=b"\x40\x00\x00")
+            self._queue_radio(mmdvm_frame(DSTAR_HEADER, to_radio.pack()), hold=3)
+            self._start_talker(self.rx)
+            with self.lock:
+                self.state["net_rx"] += 1
+        elif frame.kind == "data" and self.rx and self.rx.g2 == sender and frame.stream == self.rx.stream_id:
+            with self.lock:
+                self.state["net_rx"] += 1
+            stream = self.rx
+            stream.last = time.monotonic()
+            if frame.end:
+                self._end_rx()
+                return
+            stream.frames += 1
+            stream.slow.feed(frame.seq, frame.frame[9:12])
+            self._slow_events(stream)
+            self._queue_radio(mmdvm_frame(DSTAR_DATA, frame.frame))
 
     def _dplus_register(self, call):
         try:
@@ -549,6 +755,8 @@ class DStarGateway:
                 self.update(radio="Radio not answering. Check Menu 650 and 985.")
             elif not self.state["version"]:
                 self.port.write(mmdvm_frame(GET_VERSION))
+        if self.tx and self.tx.route:
+            self._check_route(self.tx)
         if self.rx and now - self.rx.last > .5:
             self._end_rx(lost=True)
         if self.tx and now - self.tx.last > 1.0:
@@ -558,6 +766,8 @@ class DStarGateway:
     # ------------------------------------------------------------------ network -> radio
     def _net_voice(self, frame):
         if self.tx:                         # local operator is talking: half duplex
+            return
+        if self.rx and self.rx.g2:          # a direct call is playing
             return
         if self.rx and frame.stream != self.rx.stream_id:
             if frame.kind == "header" or frame.header is not None:
@@ -646,7 +856,15 @@ class DStarGateway:
         self.pending_command = urcall_command(header.ur)
         if self.pending_command and self.pending_command[0] == "echo":
             self.echo = []
+        route_call = ""
+        if self.pending_command and self.pending_command[0] == "route":
+            route_call, self.pending_command = self.pending_command[1], None
+        elif not self.pending_command and self.state["route_to"] and not self.reflector:
+            route_call = self.state["route_to"]
         self._start_talker(self.tx)
+        if route_call:
+            self._start_route(self.tx, route_call, header)
+            return
         if self.pending_command:
             return
         if not self.reflector or self.state["link"] != "Linked":
@@ -669,6 +887,12 @@ class DStarGateway:
         self._slow_events(stream)
         if self.echo is not None and len(self.echo) < ECHO_LIMIT:
             self.echo.append(frame)
+        if stream.route:
+            if stream.route["state"] == "ok":
+                self._send_g2(g2_data_packet(stream.stream_id, seq, frame), (stream.route["ip"], stream.route["port"]))
+            elif stream.route["state"] == "wait" and len(stream.held) < 250:
+                stream.held.append((seq, frame))
+            return
         if self.pending_command or not self.reflector or stream.net_header is None:
             return
         self.counter += 1
@@ -677,6 +901,14 @@ class DStarGateway:
     def _end_tx(self):
         stream, self.tx = self.tx, None
         if not stream:
+            return
+        self._report_heard(stream)
+        if stream.route:
+            if stream.route["state"] == "ok":
+                self._send_g2(g2_data_packet(stream.stream_id, stream.seq, b"", end=True), (stream.route["ip"], stream.route["port"]))
+            elif stream.route["state"] in ("failed", "wait"):
+                self._announce(stream.header.caller, f"{stream.route['call']} {stream.route.get('why', 'not found')}"[:20])
+            self._finish(stream)
             return
         if self.reflector and stream.net_header is not None and not self.pending_command:
             self.counter += 1
@@ -687,6 +919,17 @@ class DStarGateway:
         command, self.pending_command = self.pending_command, None
         if command:
             self._run_command(command, stream.header)
+
+    def _report_heard(self, stream):
+        if not self.ircddb:
+            return
+        header = stream.header
+        ur = stream.route["call"] if stream.route else header.ur
+        try:
+            self.ircddb.heard(my=header.my, suffix=header.suffix, ur=ur, rpt1=self.my_repeater(),
+                              rpt2=self.my_gateway(), flags=header.flags, message=stream.slow.message or "")
+        except Exception:
+            pass
 
     def _run_command(self, command, header):
         action, name, module = command
@@ -709,9 +952,6 @@ class DStarGateway:
             if frames:
                 self._play(Header(rpt2=module_call("ECHO", "G"), rpt1=module_call("ECHO", "E"), ur=call,
                                   my="ECHO", suffix="TEST", flags=b"\x40\x00\x00"), frames, hold=50)
-        elif action == "route":
-            self._announce(call, "Use CQCQCQ to talk")
-            self.update(notice=f"Callsign routing ({name}) is not available; set UR to CQCQCQ")
 
     def _announce(self, ur, text):
         """Short silent transmission to the radio that shows a 20-character message."""

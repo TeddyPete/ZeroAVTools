@@ -1,5 +1,25 @@
 # Rig Companion for CardputerZero
 
+## 0.5.1 D-STAR callsign routing
+
+Direct calls to one callsign, the way a Pi-Star hotspot does it. When the
+D-STAR gateway starts, Rig Companion logs in to **QuadNet** (the open ircDDB
+network, ircv4.openquad.net, no registration) as your callsign and tells it
+where you are, so other hotspots and repeaters can call you.
+
+- **From the radio**: put a callsign in UR (e.g. `W1ABC`) and key up. The
+  gateway looks up where that station was last heard and sends your voice
+  straight to their gateway (G2, UDP port 40000).
+- **From the keyboard**: **D** on the D-STAR screen opens Direct call. Type a
+  callsign, **Enter** looks it up (last repeater, gateway, online or not),
+  **8 Talk** makes your normal CQCQCQ transmissions go to that station, **7
+  Clear** stops. Linking a reflector clears it too.
+- **Calls to you** play on the radio. They need UDP port **40000** forwarded on
+  your router to the Cardputer; calls you make work without that.
+- If a station isn't found, the radio shows "W1ABC not on QuadNet" after you
+  unkey. Setup has **Callsign routing (QuadNet) On/Off** and **My module**
+  (B by default, the letter others see after your call).
+
 ## 0.5.0 D-STAR Reflector Terminal
 
 **R** (or **8 Link → D-STAR reflectors**) opens D-STAR. The TH-D75 becomes a
@@ -26,8 +46,7 @@ mode, and the TH-D75 has no Access Point mode.
   unlinks, + `E` records and plays back an echo test, + `I` shows the link.
 - REF reflectors (DPlus) need your callsign registered at
   regist.dstargateway.org to transmit; otherwise they link listen-only. XRF,
-  XLX and DCS need no registration. Callsign routing through ircDDB is not
-  supported.
+  XLX and DCS need no registration. Callsign routing: see 0.5.1.
 - While D-STAR runs it owns the radio link; CAT controls and KISS resume when
   you stop it (**8**).
 
